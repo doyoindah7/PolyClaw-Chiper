@@ -425,35 +425,33 @@ body {
     </div>
   </div>
 
-  <!-- Trade History (always visible, paginated) -->
+  <!-- Trade History (table format, filterable, expandable rows) -->
   <div class="card" style="margin-bottom:14px" id="history-card">
-    <div class="card-title">
+    <div class="card-title" style="cursor:pointer" onclick="toggleHistoryPanel()">
       <span>📚 Trade History</span>
       <span class="badge" id="history-total">0</span>
-      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px" id="history-page-info">Page 1 of 1</span>
+      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px" id="history-page-info">[click to expand]</span>
     </div>
-    <div class="scroll-list" id="history-container">
-      <div class="empty">Loading trades...</div>
-    </div>
-    <div id="history-pagination" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-top:1px solid var(--border);font-size:0.75rem">
-      <span style="color:var(--muted);font-size:0.65rem">Auto-refresh page 1 every 5s</span>
-      <div>
-        <button id="history-prev" onclick="historyPrevPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">← Prev</button>
-        <span style="margin:0 8px;color:var(--muted)">|</span>
-        <button id="history-next" onclick="historyNextPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">Next →</button>
+    <div id="history-panel" style="display:none">
+      <!-- Filter buttons -->
+      <div style="display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:0.7rem;flex-wrap:wrap">
+        <button id="filter-all" onclick="setHistoryFilter('all')" style="background:var(--accent);color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.65rem;font-weight:600">All</button>
+        <button id="filter-profit" onclick="setHistoryFilter('profit')" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.65rem">🏆 Most Profit</button>
+        <button id="filter-loss" onclick="setHistoryFilter('loss')" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.65rem">📉 Most Loss</button>
+        <span style="flex:1"></span>
+        <span id="history-filter-info" style="color:var(--muted);align-self:center">Showing all trades</span>
       </div>
-    </div>
-  </div>
-
-  <!-- Recent Signals (collapsible) -->
-  <div class="card" style="margin-bottom:14px" id="signals-card">
-    <div class="card-title" style="cursor:pointer" onclick="togglePanel('signals-panel')">
-      <span>📡 Recent Signals</span>
-      <span class="badge" id="signal-count">0</span>
-      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px">[click to expand]</span>
-    </div>
-    <div class="scroll-list" id="signals-panel" style="display:none">
-      <div class="empty">No signals in session</div>
+      <div class="scroll-list" id="history-container" style="max-height:400px">
+        <div class="empty">Loading trades...</div>
+      </div>
+      <div id="history-pagination" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-top:1px solid var(--border);font-size:0.7rem">
+        <span style="color:var(--muted);font-size:0.6rem">Auto-refresh page 1 every 5s</span>
+        <div>
+          <button id="history-prev" onclick="historyPrevPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.65rem">← Prev</button>
+          <span style="margin:0 6px;color:var(--muted)">|</span>
+          <button id="history-next" onclick="historyNextPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.65rem">Next →</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -653,30 +651,8 @@ function renderStrategies(d) {
 }
 
 function renderSignals(d) {
-  const signals = d.recent_signals || [];
-  const cont = document.getElementById('signals-panel');
-  document.getElementById('signal-count').textContent = signals.length;
-  if (signals.length === 0) {
-    cont.innerHTML = '<div class="empty">No signals in session</div>';
-    return;
-  }
-  let html = '<table class="tbl"><thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Price</th><th>Conf</th><th>Size</th><th>Exec</th><th>Reject</th></tr></thead><tbody>';
-  for (const s of signals.slice().reverse()) {
-    const strat = s.strategy || '';
-    const execMark = s.executed ? '✅' : '❌';
-    html += '<tr>' +
-      '<td style="color:var(--muted);font-size:0.6rem">' + timeAgo(s.timestamp) + '</td>' +
-      '<td><span class="tag ' + strat + '">' + strat + '</span></td>' +
-      '<td class="side-' + (s.side||'') + '">' + (s.side||'') + '</td>' +
-      '<td>$' + fmt(s.suggested_price, 4) + '</td>' +
-      '<td>' + fmt(s.confidence, 2) + '</td>' +
-      '<td>$' + fmt(s.suggested_size_usd, 2) + '</td>' +
-      '<td style="color:' + (s.executed ? 'var(--green)' : 'var(--muted)') + '">' + execMark + '</td>' +
-      '<td style="color:var(--red);font-size:0.58rem;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + (s.rejected_reason||'') + '">' + (s.rejected_reason||'') + '</td>' +
-      '</tr>';
-  }
-  html += '</tbody></table>';
-  cont.innerHTML = html;
+  // Removed: Recent Signals section deleted from dashboard (was always 0).
+  // Kept as no-op for backward compat.
 }
 
 function renderTrades(d) {
@@ -805,12 +781,48 @@ function togglePanel(id) {
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
-// Trade History with pagination (always visible, auto-load + auto-refresh page 1)
+// Trade History: table format, filterable, expandable rows, paginated
 let historyPage = 1;
 let historyTotalPages = 1;
-let historyAutoRefresh = true;
+let historyFilter = 'all'; // 'all' | 'profit' | 'loss'
+let historyPanelOpen = false;
+let historyAllTrades = []; // cache for filtering
+
+async function toggleHistoryPanel() {
+  const panel = document.getElementById('history-panel');
+  const willShow = panel.style.display === 'none';
+  panel.style.display = willShow ? 'block' : 'none';
+  historyPanelOpen = willShow;
+  document.getElementById('history-page-info').textContent = willShow ? 'Loading...' : '[click to expand]';
+  if (willShow) {
+    await loadHistoryPage(1);
+  }
+}
+
+function setHistoryFilter(filter) {
+  historyFilter = filter;
+  // Update button styles
+  const btns = {'all': 'filter-all', 'profit': 'filter-profit', 'loss': 'filter-loss'};
+  for (const [k, id] of Object.entries(btns)) {
+    const btn = document.getElementById(id);
+    if (k === filter) {
+      btn.style.background = 'var(--accent)';
+      btn.style.color = 'white';
+      btn.style.fontWeight = '600';
+      btn.style.border = 'none';
+    } else {
+      btn.style.background = 'var(--card2)';
+      btn.style.color = 'var(--text)';
+      btn.style.fontWeight = 'normal';
+      btn.style.border = '1px solid var(--border)';
+    }
+  }
+  // Re-render with filter
+  renderHistoryTable();
+}
 
 async function loadHistoryPage(page, silent) {
+  if (!historyPanelOpen) return;
   const container = document.getElementById('history-container');
   if (!silent) container.innerHTML = '<div class="empty">Loading page ' + page + '...</div>';
   try {
@@ -819,46 +831,77 @@ async function loadHistoryPage(page, silent) {
     const data = await resp.json();
     historyPage = data.page || 1;
     historyTotalPages = data.total_pages || 1;
+    historyAllTrades = data.trades || [];
     document.getElementById('history-total').textContent = data.total || 0;
     document.getElementById('history-page-info').textContent =
-      'Page ' + historyPage + ' of ' + historyTotalPages + ' (' + data.total + ' trades)';
+      'Page ' + historyPage + ' of ' + historyTotalPages;
     document.getElementById('history-prev').disabled = (historyPage <= 1);
     document.getElementById('history-next').disabled = (historyPage >= historyTotalPages);
-
-    if (!data.trades || data.trades.length === 0) {
-      container.innerHTML = '<div class="empty">No trades found</div>';
-      return;
-    }
-    let html = '';
-    for (const t of data.trades) {
-      const pnlClass = t.pnl_dollar > 0 ? 'pos' : (t.pnl_dollar < 0 ? 'neg' : 'neu');
-      const pnlSign = t.pnl_dollar >= 0 ? '+' : '';
-      const date = new Date(t.closed_at * 1000).toISOString().replace('T',' ').substring(0,19);
-      const pairBadge = t.is_pair ? ' <span style="color:var(--purple);font-size:0.6rem">PAIR</span>' : '';
-      html += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:0.75rem">';
-      html += '<div style="display:flex;justify-content:space-between;align-items:start">';
-      html += '<div style="flex:1;min-width:0">';
-      html += '<div style="font-weight:600;color:var(--text)">' + (t.market_question||'').substring(0,80) + '</div>';
-      html += '<div style="color:var(--muted);font-size:0.65rem;margin-top:2px">';
-      html += '<span style="color:var(--blue)">' + t.strategy + '</span>' + pairBadge;
-      html += ' · <span style="color:var(--' + (t.side==='YES'?'green':'red') + ')">' + t.side + '</span>';
-      html += ' · ' + date + ' UTC';
-      html += ' · entry=' + t.entry_price.toFixed(4) + ' exit=' + t.exit_price.toFixed(4);
-      html += ' · $' + t.invested.toFixed(2) + ' (' + t.shares.toFixed(1) + ' sh)';
-      html += '</div>';
-      html += '<div style="color:var(--muted);font-size:0.65rem;margin-top:2px">Reason: ' + (t.reason||'') + '</div>';
-      html += '</div>';
-      html += '<div style="text-align:right;min-width:90px">';
-      html += '<div class="delta ' + pnlClass + '" style="font-size:0.9rem;font-weight:700">' + pnlSign + '$' + t.pnl_dollar.toFixed(4) + '</div>';
-      html += '<div class="delta ' + pnlClass + '" style="font-size:0.7rem">' + pnlSign + t.pnl_percent.toFixed(2) + '%</div>';
-      html += '</div>';
-      html += '</div>';
-      html += '</div>';
-    }
-    container.innerHTML = html;
+    renderHistoryTable();
   } catch (e) {
     container.innerHTML = '<div class="empty">Error loading trades: ' + e.message + '</div>';
   }
+}
+
+function renderHistoryTable() {
+  const container = document.getElementById('history-container');
+  let trades = historyAllTrades;
+  let filterLabel = 'Showing all trades';
+  if (historyFilter === 'profit') {
+    trades = trades.filter(t => t.pnl_dollar > 0).sort((a,b) => b.pnl_dollar - a.pnl_dollar);
+    filterLabel = '🏆 Top profit on this page';
+  } else if (historyFilter === 'loss') {
+    trades = trades.filter(t => t.pnl_dollar < 0).sort((a,b) => a.pnl_dollar - b.pnl_dollar);
+    filterLabel = '📉 Top losses on this page';
+  }
+  document.getElementById('history-filter-info').textContent = filterLabel + ' (' + trades.length + ')';
+
+  if (trades.length === 0) {
+    container.innerHTML = '<div class="empty">No trades found</div>';
+    return;
+  }
+
+  let html = '<table class="tbl"><thead><tr>' +
+    '<th>Market</th><th>Strat</th><th>Side</th><th>Entry</th><th>Exit</th>' +
+    '<th>PnL $</th><th>PnL %</th><th>Reason</th><th>When</th>' +
+    '</tr></thead><tbody>';
+  for (const t of trades) {
+    const pnlCls = t.pnl_dollar >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const strat = t.strategy || '';
+    const safeQ = (t.market_question||'').replace(/"/g,'&quot;');
+    const safeR = (t.reason||'').replace(/"/g,'&quot;');
+    html += '<tr style="cursor:pointer" onclick="toggleTradeDetail(\'' + t.id + '\')">' +
+      '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + safeQ + '">' + (t.market_question||'').substring(0,35) + '</td>' +
+      '<td><span class="tag ' + strat + '">' + strat + '</span></td>' +
+      '<td class="side-' + (t.side||'') + '">' + (t.side||'') + '</td>' +
+      '<td>$' + fmt(t.entry_price, 4) + '</td>' +
+      '<td>$' + fmt(t.exit_price, 4) + '</td>' +
+      '<td class="' + pnlCls + '" style="font-weight:600">' + (t.pnl_dollar>=0?'+':'') + '$' + fmt(t.pnl_dollar, 4) + '</td>' +
+      '<td class="' + pnlCls + '">' + (t.pnl_percent>=0?'+':'') + fmt(t.pnl_percent, 1) + '%</td>' +
+      '<td style="color:var(--muted);font-size:0.6rem;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + safeR + '">' + (t.reason||'') + '</td>' +
+      '<td style="color:var(--muted);font-size:0.65rem">' + timeAgo(t.closed_at) + '</td>' +
+      '</tr>';
+    // Expandable detail row (hidden by default)
+    const date = new Date(t.closed_at * 1000).toISOString().replace('T',' ').substring(0,19);
+    const pairBadge = t.is_pair ? ' <span style="color:var(--purple)">PAIR</span>' : '';
+    html += '<tr id="detail-' + t.id + '" style="display:none">' +
+      '<td colspan="9" style="background:var(--card2);padding:10px 12px;font-size:0.7rem;color:var(--muted)">' +
+      '<div style="margin-bottom:4px"><b style="color:var(--text)">Full market:</b> ' + (t.market_question||'') + '</div>' +
+      '<div style="margin-bottom:4px"><b style="color:var(--text)">Trade ID:</b> ' + t.id + pairBadge + ' · <b style="color:var(--text)">Strategy:</b> ' + t.strategy + '</div>' +
+      '<div style="margin-bottom:4px"><b style="color:var(--text)">Entry:</b> $' + fmt(t.entry_price,4) + ' → <b style="color:var(--text)">Exit:</b> $' + fmt(t.exit_price,4) + '</div>' +
+      '<div style="margin-bottom:4px"><b style="color:var(--text)">Invested:</b> $' + fmt(t.invested,2) + ' · <b style="color:var(--text)">Shares:</b> ' + fmt(t.shares,2) + '</div>' +
+      '<div style="margin-bottom:4px"><b style="color:var(--text)">PnL:</b> <span class="' + pnlCls + '">' + (t.pnl_dollar>=0?'+':'') + '$' + fmt(t.pnl_dollar,4) + ' (' + (t.pnl_percent>=0?'+':'') + fmt(t.pnl_percent,2) + '%)</span></div>' +
+      '<div style="margin-bottom:4px"><b style="color:var(--text)">Reason:</b> ' + (t.reason||'') + '</div>' +
+      '<div><b style="color:var(--text)">Closed:</b> ' + date + ' UTC (' + timeAgo(t.closed_at) + ' ago)</div>' +
+      '</td></tr>';
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function toggleTradeDetail(id) {
+  const row = document.getElementById('detail-' + id);
+  if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
 }
 
 async function historyPrevPage() {
@@ -955,8 +998,8 @@ async function refresh() {
       document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
       updateConnectionStatus(true);
       // Auto-refresh Trade History page 1 (silent — no loading spinner)
-      // Only refresh if user is on page 1 (don't disrupt browsing older pages)
-      if (historyPage === 1) {
+      // Only refresh if panel is open AND user is on page 1 with 'all' filter
+      if (historyPanelOpen && historyPage === 1 && historyFilter === 'all') {
         loadHistoryPage(1, true);
       }
     } else {
@@ -969,9 +1012,8 @@ async function refresh() {
   }
 }
 
-// Initial load: fetch stats + trade history page 1
+// Initial load: fetch stats (trade history loads on panel expand)
 refresh();
-loadHistoryPage(1);
 setInterval(refresh, REFRESH_MS);
 setInterval(() => {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString();
