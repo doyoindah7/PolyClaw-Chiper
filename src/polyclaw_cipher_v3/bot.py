@@ -281,7 +281,7 @@ class PolyClawCipherV3:
             # Register sibling entry in strategy
             if hasattr(strat, "register_entry"):
                 strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
-            logger.info("PAIR SIBLING: %s %s @ %.4f | $%.2f", 
+            logger.info("PAIR SIBLING: %s @ %.4f | $%.2f",
                         sibling.side.value, sibling.entry_price, sibling.invested)
 
         await self.signal_repo.log_signal(signal, executed=True)
