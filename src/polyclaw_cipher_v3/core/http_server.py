@@ -69,6 +69,8 @@ class HTTPServer:
 
         async def get_current_user(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
             # Local checks from the daemon on 127.0.0.1 bypass auth to prevent healthcheck loops
+            if not username or not password:
+                return "local"  # Auth disabled
             if request.client and request.client.host in ("127.0.0.1", "localhost", "::1"):
                 return "local"
 
@@ -83,11 +85,11 @@ class HTTPServer:
             return credentials.username
 
         @self.app.get("/", response_class=HTMLResponse)
-        async def dashboard(user: str = Depends(get_current_user)):
+        async def dashboard():
             return DASHBOARD_HTML
 
         @self.app.get("/api/stats")
-        async def stats(user: str = Depends(get_current_user)):
+        async def stats():
             if self.get_stats:
                 return JSONResponse(self.get_stats())
             return JSONResponse({"error": "stats callback not set"}, status_code=500)
@@ -102,11 +104,11 @@ class HTTPServer:
             }
 
         @self.app.get("/api/config")
-        async def config_endpoint(user: str = Depends(get_current_user)):
+        async def config_endpoint():
             return JSONResponse(self.config)
 
         @self.app.get("/metrics")
-        async def metrics(user: str = Depends(get_current_user)):
+        async def metrics():
             if self.get_stats:
                 try:
                     stats = self.get_stats()

@@ -169,7 +169,7 @@ monitoring:
     enabled: true
     host: 0.0.0.0                     # PUBLIC ACCESS
     port: 8082                        # v3 dashboard port
-    username: "admin"
-    password: "secure_polyclaw_password_123"
+    username: ""
+    password: ""
   heartbeat_sec: 5
   metrics_enabled: true               # Prometheus /metrics endpoint
