@@ -58,6 +58,8 @@ class LatencyArbStrategy(BaseStrategy):
         self._skip_max_pos = 0
         self._skip_low_edge = 0
         self._skip_no_updown_momentum = 0
+        self._skip_nearly_resolved = 0       # v3.5.5: market YES or NO > 0.95
+        self._skip_updown_decided = 0        # v3.5.5: UPDOWN market YES or NO > 0.85
         self._updown_signals = 0
         self._threshold_signals = 0
         self._updown_evaluated = 0
@@ -153,13 +155,28 @@ class LatencyArbStrategy(BaseStrategy):
 
         # v3.5.4: Use fallback logic for price
         yes_price, no_price = self._get_price(market)
-        
+
         if yes_price <= 0 and no_price <= 0:
             self._skip_no_api_price += 1
             return None
 
         is_updown = self._is_up_down_market(market.question)
         has_threshold = bool(THRESHOLD_PATTERN.search(market.question) or THRESHOLD_PATTERN_ALT.search(market.question))
+
+        # v3.5.5 FIX (P0-03, P0-04): Filter nearly-resolved markets
+        # When YES or NO > 0.95, market is already "decided" — edge is illusionary.
+        # Real-world slippage 0.5-2% will eat any profit; worse, bot can lose 100% if
+        # it bets against the near-certain side. These markets also trap cash for hours.
+        max_price = max(yes_price, no_price)
+        if max_price > 0.95:
+            self._skip_nearly_resolved += 1
+            return None
+
+        # v3.5.5: For UPDOWN specifically, also filter when market already decided (>0.85)
+        # BTC Up/Down markets at YES=0.98 mean 98% certain Up — betting NO is gambling, not arb
+        if is_updown and max_price > 0.85:
+            self._skip_updown_decided += 1
+            return None
 
         now = time.time()
         last = self._last_signal_at.get(market.condition_id, 0.0)
@@ -249,6 +266,8 @@ class LatencyArbStrategy(BaseStrategy):
                 open_positions_for_strategy=len(my_positions),
                 max_positions_for_strategy=self.max_positions,
                 confidence=confidence, strategy_max_pct=strategy_cap_pct,
+                total_open_positions=context.get("total_open_positions", 0),
+                max_total_positions=context.get("max_total_positions", 10),
             )
         else:
             available_slots = max(1, self.max_positions - len(my_positions))
@@ -309,6 +328,8 @@ class LatencyArbStrategy(BaseStrategy):
             "skip_max_pos": self._skip_max_pos,
             "skip_low_edge": self._skip_low_edge,
             "skip_no_updown_momentum": self._skip_no_updown_momentum,
+            "skip_nearly_resolved": self._skip_nearly_resolved,        # v3.5.5
+            "skip_updown_decided": self._skip_updown_decided,           # v3.5.5
             "updown_evaluated": self._updown_evaluated,
             "updown_signals": self._updown_signals,
             "threshold_signals": self._threshold_signals,

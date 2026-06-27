@@ -143,6 +143,8 @@ class MomentumStrategy(BaseStrategy):
                 max_positions_for_strategy=self.max_positions,
                 confidence=confidence,
                 strategy_max_pct=strategy_cap_pct,
+                total_open_positions=context.get("total_open_positions", 0),
+                max_total_positions=context.get("max_total_positions", 10),
             )
         else:
             available_slots = max(1, self.max_positions - len(my_positions))

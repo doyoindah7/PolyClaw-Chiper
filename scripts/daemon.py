@@ -143,9 +143,17 @@ class StagnationDetector:
         """Check if bot has been stagnant (no state change) for threshold_min minutes.
 
         Returns (is_stagnant, reason).
+
+        v3.5.5 FIX (MiniMax C2): open_positions guard moved here from record() (was a no-op bug).
+        If open positions exist, bot is waiting for market resolution — NOT stagnant.
         """
         now = time.time()
         threshold = threshold_min * 60
+
+        # v3.5.5: open_positions guard — if positions exist, bot is waiting for resolution, not stuck
+        open_positions = stats.get("open_positions", [])
+        if len(open_positions) > 0:
+            return False, f"OK (have {len(open_positions)} open positions, waiting for resolution)"
 
         # Need at least 3 samples to compare
         for key in self.history:
@@ -166,10 +174,11 @@ class StagnationDetector:
                 return True, f"No new trades for {threshold_min}m (trades stuck at {int(tr_hist[-1][1])})"
 
         # Check 3: No new signals for 10 min
+        # v3.5.5: Only trigger if also no open positions (open positions guard above handles that case)
         sig_hist = self.history["signals"]
         if sig_hist[-1][0] - sig_hist[0][0] >= 600:  # 10 min
             if sig_hist[-1][1] == sig_hist[0][1]:
-                return True, "No new signals for 10m (strategies may be dead)"
+                return True, "No new signals for 10m and no open positions (strategies may be dead)"
 
         # Check 4: All strategies disabled
         disabled = stats.get("risk", {}).get("disabled_strategies", [])

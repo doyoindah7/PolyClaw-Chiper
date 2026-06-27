@@ -41,6 +41,8 @@ class CompoundingSizer:
         max_positions_for_strategy: int,
         confidence: float,
         strategy_max_pct: float,
+        total_open_positions: int = 0,
+        max_total_positions: int = 10,
     ) -> float:
         """Calculate position size in USD.
 
@@ -51,7 +53,23 @@ class CompoundingSizer:
             max_positions_for_strategy: Max concurrent for THIS strategy
             confidence: Signal confidence 0-1
             strategy_max_pct: Per-strategy max capital % (PRIMARY source of truth)
+            total_open_positions: v3.5.5 — total open positions across ALL strategies
+            max_total_positions: v3.5.5 — global max_open_positions from config
         """
+        # v3.5.5 FIX (P0-02): Hard block when total positions exceed global limit
+        # Prevents bot from opening 13+ positions when max_open_positions=10 in config
+        if total_open_positions >= max_total_positions:
+            return 0.0
+        # Also block if over limit by 30%+ (defensive — shouldn't happen but safety net)
+        if total_open_positions >= int(max_total_positions * 1.3):
+            return 0.0
+
+        # v3.5.5 FIX (P0-02): When cash is critically low (< $1), block ALL new entries
+        # This is the actual deadlock condition — bot cannot meaningfully trade with $0.47
+        # Better to wait for positions to close naturally than to open tiny positions
+        if cash < 1.0:
+            return 0.0
+
         # v3.3.0: Dynamic cash buffer — auto-increase reserve if over-deployed
         # v3.3.1 fix: Deadlock prevention — if cash < reserve (over-deployed),
         # don't block entirely. Allow emergency trading with reduced size.
@@ -67,10 +85,13 @@ class CompoundingSizer:
 
         # v3.3.1 fix: Emergency mode — if deployable = 0 but cash > min_position_usd,
         # allow reduced trading (50% of available cash) to prevent deadlock.
-        # Bot stays active, can generate TP/SL exits to free cash naturally.
+        # v3.5.5: TIGHTENED — only allow emergency trades for high-confidence signals (>= 0.75)
+        # Low-confidence signals in emergency mode just burn cash without good expected value
         if deployable < self.min_position_usd and cash > self.min_position_usd:
-            deployable = cash * 0.5  # Emergency: use 50% of available cash
-            # Note: confidence scaling will further reduce this
+            if confidence >= 0.75:
+                deployable = cash * 0.3  # v3.5.5: was 0.5, more conservative
+            else:
+                return 0.0  # v3.5.5: Block low-conf emergency trades
 
         free_slots = max(1, max_positions_for_strategy - open_positions_for_strategy)
         base_notional = deployable / free_slots

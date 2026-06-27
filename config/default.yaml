@@ -50,14 +50,14 @@ strategies:
   #         Based on consensus Claude + Lisa + Grok: keep category filter, relax thresholds.
   resolution_snipe:
     enabled: true
-    min_odds: 0.88                    # v3.3.0: relaxed from 0.90 (more opportunities)
+    min_odds: 0.92                    # v3.5.5 FIX (P0-05): was 0.88 — only near-certain markets
     max_odds: 0.97
-    max_hours_to_close: 72            # v3.3.0: relaxed from 24h
+    max_hours_to_close: 24            # v3.5.5 FIX (P0-05): was 72 — only fast-resolve markets
     # LLM disabled until API key configured
     llm_enabled: false
     llm_min_confidence: 0.85
     max_position_pct: 0.15            # Conservative (modal terkunci)
-    max_concurrent: 5
+    max_concurrent: 3                 # v3.5.5 FIX (P0-05): was 5 — limit exposure while under review
     cooldown_sec: 60
     # TP/SL exit
     stop_loss_pct: 10.0               # Exit if odds drop -10% from entry (cut losses)
@@ -118,6 +118,9 @@ risk:
   max_trades_per_hour_global: 60
   session_rotation_min: 240           # 4 hours
   max_net_exposure_per_asset_pct: 50.0 # Max net exposure to any single asset (e.g. BTC) as % of bankroll
+  # v3.5.5 FIX (P1-05): Force-close stale positions to free cash
+  max_position_age_sec: 1800          # 30 min — close ALL stale positions
+  dead_position_age_sec: 900          # 15 min — close "dead" positions (0% PnL movement) sooner
 
   per_strategy:
     latency_arb:

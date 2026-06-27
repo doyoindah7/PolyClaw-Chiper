@@ -1,11 +1,11 @@
-# PolyClaw-Cipher v3.4.3 🔍
+# PolyClaw-Cipher v3.5.5 🔍
 
 > HFT-capable Polymarket bot with AI agent — aggressive compounding for small capital ($25+)
 
 **Repository:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
-**Version:** 3.4.3
+**Version:** 3.5.5 (Super Z audit fixes — 2026-06-28)
 **Status:** RUNNING (paper trading, deployed at http://3.107.53.103:8082/)
-**Bankroll:** $54.17 (+116.7% from $25 initial)
+**Bankroll:** $59.47 (+137.9% from $25 initial)
 
 ---
 

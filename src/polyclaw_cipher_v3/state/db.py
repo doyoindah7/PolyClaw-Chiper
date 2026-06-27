@@ -118,10 +118,29 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
+        # v3.5.5 FIX (P1-03): Auto-checkpoint every 500 pages (~2MB) instead of default 1000
+        # Prevents WAL file from growing unbounded (was 4.1MB at audit time)
+        await self._db.execute("PRAGMA wal_autocheckpoint=500")
+        # v3.5.5: Optimize SQLite for our workload
+        await self._db.execute("PRAGMA cache_size=-2000")  # 2MB cache
+        await self._db.execute("PRAGMA temp_store=MEMORY")
+        await self._db.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
         # Schema
         await self._db.executescript(SCHEMA)
         await self._db.commit()
-        logger.info("Database connected: %s (WAL mode)", self.db_path)
+        # v3.5.5: Run immediate checkpoint on startup to flush any pending WAL from previous run
+        await self._db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        logger.info("Database connected: %s (WAL mode, auto-checkpoint=500)", self.db_path)
+
+    async def checkpoint(self) -> None:
+        """v3.5.5: Manual WAL checkpoint — call periodically to flush WAL to main DB.
+
+        PASSIVE mode: checkpoint as much as possible without blocking readers/writers.
+        Safe to call during normal operation.
+        """
+        if self._db:
+            await self._db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            await self._db.commit()
 
     async def close(self) -> None:
         if self._db:

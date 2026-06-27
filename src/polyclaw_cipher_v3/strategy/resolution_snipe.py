@@ -166,6 +166,8 @@ class ResolutionSnipeStrategy(BaseStrategy):
                 max_positions_for_strategy=self.max_concurrent,
                 confidence=confidence,
                 strategy_max_pct=strategy_cap_pct,
+                total_open_positions=context.get("total_open_positions", 0),
+                max_total_positions=context.get("max_total_positions", 10),
             )
         else:
             notional = min(cash * 0.90, bankroll * self.max_position_pct)

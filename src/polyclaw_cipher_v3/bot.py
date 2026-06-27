@@ -122,6 +122,9 @@ class PolyClawCipherV3:
         self._position_lock = asyncio.Lock()
         # v3.4.0 FIX (BUG-C7): Cache open positions per loop iteration
         self._cached_open_positions: list[Position] = []
+        # v3.5.5 FIX (P1-05): Force-close stale/dead positions to free cash
+        self.max_position_age_sec = self.config.get("risk", {}).get("max_position_age_sec", 1800)  # 30 min
+        self.dead_position_age_sec = self.config.get("risk", {}).get("dead_position_age_sec", 900)  # 15 min
         self._stats_task: asyncio.Task | None = None
 
     async def run(self) -> None:
@@ -157,6 +160,8 @@ class PolyClawCipherV3:
         await self.http_server.start()
         # Background stats cache refresher (every 2s)
         self._stats_task = asyncio.create_task(self._refresh_stats_loop(), name="stats_cache")
+        # v3.5.5 FIX (P1-03): Periodic WAL checkpoint every 30 min to flush WAL file
+        self._checkpoint_task = asyncio.create_task(self._checkpoint_loop(), name="wal_checkpoint")
 
         await self.alerter.notify_startup(
             self.wallet.bankroll,
@@ -282,6 +287,10 @@ class PolyClawCipherV3:
             "cash": self.wallet.available_cash,
             "sizer": self.sizer,
             "strategy_cap_pct": 0.25,  # Default, overridden per-strategy below
+            # v3.5.5 FIX (P0-02): Pass total_open_positions and max_total_positions
+            # so sizer can hard-block when bot is over-deployed
+            "total_open_positions": len(open_positions),
+            "max_total_positions": self.config.get("bot", {}).get("max_open_positions", 10),
         }
 
         for strat in self.strategies:
@@ -451,6 +460,37 @@ class PolyClawCipherV3:
                     if should_exit:
                         trade = await self.executor.close_position(pos, current, exit_reason)
                         await self._close_position(pos, trade, strat_name=pos.strategy)
+
+            # v3.5.5 FIX (P1-05): Force-close stale positions to free cash.
+            # Two-tier logic:
+            #   - 30 min (max_position_age_sec): close ALL stale positions (default)
+            #   - 15 min + 0% PnL (dead_position_age_sec): close "dead" positions sooner
+            #     These are positions in nearly-resolved markets where price hasn't moved
+            #     at all — they just trap cash without any profit potential.
+            pos_age_sec = time.time() - pos.opened_at
+            max_age = getattr(self, 'max_position_age_sec', 1800)
+            dead_age = getattr(self, 'dead_position_age_sec', 900)  # 15 min
+
+            if pos_age_sec > max_age:
+                # Standard stale close (was 1.0h, now 30 min)
+                current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
+                if current <= 0:
+                    current = pos.entry_price
+                trade = await self.executor.close_position(pos, current, "Force-close stale ({:.1f}h)".format(pos_age_sec/3600))
+                await self._close_position(pos, trade, strat_name=pos.strategy)
+                logger.info("STALE CLOSE: %s age=%.1fh price=%.4f", pos.id[:8], pos_age_sec/3600, current)
+                continue  # Skip further processing since position was closed
+
+            if pos_age_sec > dead_age:
+                # v3.5.5: Dead position check — if PnL is exactly 0%, market is "dead"
+                # (entry_price == current_price means no movement, likely nearly-resolved)
+                current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
+                if current > 0 and abs(current - pos.entry_price) < 0.001:
+                    trade = await self.executor.close_position(pos, current, "Force-close dead (0% PnL, {:.1f}h)".format(pos_age_sec/3600))
+                    await self._close_position(pos, trade, strat_name=pos.strategy)
+                    logger.info("DEAD CLOSE: %s age=%.1fh entry=%.4f current=%.4f (no movement)",
+                                pos.id[:8], pos_age_sec/3600, pos.entry_price, current)
+                    continue
 
     async def _close_position(self, pos: Position, trade, strat_name: str) -> None:
         """Close position: persist trade, update wallet, update risk.
@@ -697,6 +737,22 @@ class PolyClawCipherV3:
             except Exception as e:
                 logger.error("Stats refresh error: %s", e, exc_info=True)
             await asyncio.sleep(3)
+
+    async def _checkpoint_loop(self) -> None:
+        """v3.5.5 FIX (P1-03): Periodic WAL checkpoint every 30 minutes.
+
+        Flushes WAL file to main DB to prevent unbounded WAL growth.
+        PASSIVE mode is safe — does not block concurrent readers/writers.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(1800)  # 30 min
+                await self.db.checkpoint()
+                logger.info("WAL checkpoint completed (periodic)")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("WAL checkpoint error: %s", e)
 
     def stop(self) -> None:
         self._running = False

@@ -5,6 +5,125 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.5.5] — 2026-06-28 (Super Z forensic audit fixes — 6 P0 + 4 P1 issues)
+
+Based on independent forensic audit by **Super Z (Z.ai)** combining VPS live-system probe
+and GitHub source code review. Fixes 6 critical issues + 4 high-priority issues identified
+in audit, plus corrects a bug in MiniMax audit fix that was applied incorrectly.
+
+### 🐛 Fixed — CRITICAL (P0)
+
+- **P0-01: Docker log rotation missing** (disk fill risk)
+  - Symptom: Docker container logs grew unbounded. Disk usage hit 87.3% during MiniMax audit.
+  - Root cause: `docker-compose.yml` had no `logging:` config — Docker defaults to unlimited json-file.
+  - Fix: Added `logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }` — caps at 50MB.
+
+- **P0-02: Bot over-deployment + deadlock** (cash $0.47 vs bankroll $59.47, 15 open positions)
+  - Symptom: Bot opened 15 positions when `max_open_positions: 10`. Cash drained to $0.47, bot stuck.
+  - Root cause: Sizer had no global position limit check — only per-strategy limits.
+  - Fix: Added `total_open_positions` and `max_total_positions` params to `CompoundingSizer.size()`.
+    Sizer now hard-blocks when total positions >= max_total_positions. Also blocks when cash < $1.0
+    (cannot meaningfully trade). Emergency mode tightened to only allow high-confidence (>=0.75) signals,
+    and reduced emergency deployable from `cash * 0.5` to `cash * 0.3`.
+
+- **P0-03: latency_arb THRESHOLD edge illusionary** (false signals on nearly-resolved markets)
+  - Symptom: Bot fired signals on markets with YES=1.000, NO=0.001 — edge 0.95% is illusionary
+    (slippage 0.5-2% eats profit, often negative after fees).
+  - Root cause: No filter for nearly-resolved markets.
+  - Fix: Added filter in `latency_arb.py` `evaluate()` — skip if `max(yes_price, no_price) > 0.95`.
+
+- **P0-04: latency_arb UPDOWN edge illusionary** (45% edge on 98%-certain markets)
+  - Symptom: BTC Up/Down market with YES=0.982, NO=0.019 produced edge=45.66% — but betting NO
+    when market is 98% certain Up means 98% probability of 100% loss.
+  - Root cause: UPDOWN path had no "market already decided" filter.
+  - Fix: Added separate filter for UPDOWN — skip if `max(yes_price, no_price) > 0.85`.
+
+- **P0-05: resolution_snipe WR 7-12%** (fundamentally flawed config)
+  - Symptom: Strategy had WR 7.14% (1W/3L) with config `min_odds: 0.82, max_odds: 0.98, max_hours: 96`.
+  - Root cause: Config too relaxed — captured markets that weren't truly near-certain, and held
+    positions for up to 4 days tying up capital.
+  - Fix: Tightened config — `min_odds: 0.92` (was 0.88), `max_hours_to_close: 24` (was 72),
+    `max_concurrent: 3` (was 5). Strategy under review pending backtest validation.
+
+- **P0-06: VPS code drift from GitHub repo** (8/33 files different)
+  - Symptom: VPS running v3.5.0 + partial v3.5.4 (latency_arb.py only). Missing v3.5.1-v3.5.3 fixes.
+  - Root cause: VPS deployment was manual file copy, no git tracking. No CI/CD pipeline.
+  - Fix: This release — all v3.5.x changes consolidated and pushed to GitHub. Deployment via
+    `git clone` + `docker-compose up --build -d` establishes single source of truth.
+
+### 🐛 Fixed — HIGH (P1)
+
+- **P1-03: SQLite WAL file unbounded growth** (4.1MB WAL at audit time)
+  - Symptom: `cipher_v3.db-wal` reached 4.1MB without checkpoint — corruption risk on crash.
+  - Root cause: Default `wal_autocheckpoint=1000` too high for write-heavy workload.
+  - Fix: Set `PRAGMA wal_autocheckpoint=500` (more aggressive). Added startup checkpoint.
+    Added `_checkpoint_loop()` in bot — runs PASSIVE checkpoint every 30 minutes.
+    Also added `PRAGMA cache_size`, `temp_store=MEMORY`, `mmap_size` optimizations.
+
+- **P1-05: Force-close stale dominant exit reason** (7/10 recent trades)
+  - Symptom: Bot opened positions in dead markets (no price movement), held for 1 hour,
+    then force-closed with ~0% PnL — wasted capital and trade slots.
+  - Root cause: VPS had `max_position_age_sec=1800` (30 min) but no early close for "dead" positions.
+  - Fix: Added two-tier force-close logic in `bot.py` `_manage_positions()`:
+    - 30 min (`max_position_age_sec`): close ALL stale positions
+    - 15 min + 0% PnL movement (`dead_position_age_sec`): close "dead" positions sooner
+    Frees cash for productive trades instead of waiting 30 min on dead markets.
+
+### 🐛 Fixed — MiniMax Audit Issues
+
+- **MiniMax C2: Stagnation detector misbehavior** (incorrectly applied, then fixed correctly)
+  - Symptom: MiniMax audit identified that stagnation detector restarted bot when open positions
+    existed (bot was correctly waiting for resolution, not stuck).
+  - User applied fix by adding `open_positions > 0` check, but placed it in `record()` method
+    (return type `None`) instead of `is_stagnant()` method — fix was a no-op.
+  - Fix (this release): Moved `open_positions > 0` guard to correct method `is_stagnant()`.
+    Now properly returns "OK (have N open positions, waiting for resolution)" when positions exist.
+
+### 🔧 Changed
+
+- **Config: resolution_snipe tightened** — see P0-05 above.
+- **Config: added `max_position_age_sec` and `dead_position_age_sec`** under `risk:` section.
+- **Daemon: stagnation check #3 message clarified** — now says "and no open positions" to make
+  the guard explicit.
+
+### 📊 Pre-Deploy Verification (target metrics)
+
+- Bot version string: `3.5.5` (was `3.5.0`)
+- Sizer hard-blocks new entries when total positions >= 10 (config `max_open_positions`)
+- Sizer hard-blocks new entries when cash < $1.0
+- latency_arb skips markets where YES or NO > 0.95 (configurable in code)
+- latency_arb UPDOWN skips markets where YES or NO > 0.85
+- resolution_snipe only enters markets with odds 0.92-0.97, closing within 24h, max 3 concurrent
+- WAL checkpoint runs every 30 min + on startup
+- Docker logs capped at 5×10MB = 50MB max
+- Stagnation detector respects open_positions guard (no more false restarts)
+
+---
+
+## [3.5.0] — 2026-06-27 (Stagnation detection + bot status + dashboard enhancements)
+
+Based on Arena.ai Agent Mode audit recommendations.
+
+### ✨ Added
+
+- **Stagnation detector** (`scripts/daemon.py:115-203`): Track bankroll/trades/signals state
+  deltas over 2-hour window. Restart bot if stagnant (6 detection checks). Cooldown 30 min
+  between stagnation restarts.
+- **Bot status computation** (`bot.py:669-679`): Compute `ACTIVE` / `IDLE` / `STAGNANT` /
+  `CASH_STUCK` based on recent activity. Exposed in `/api/stats`.
+- **Strategy eval logging** (`bot.py:249-255`): Log strategy evaluation summary every ~30s
+  to avoid log spam. Shows markets evaluated and signals generated per strategy.
+- **Latency arb debug stats** (`bot.py:645`, `latency_arb.py:get_debug_stats()`): Expose
+  skip counters in `/api/stats` under `latency_arb_debug` field. Helps troubleshoot
+  why latency_arb emits 0 signals.
+
+### 🔧 Changed
+
+- **Force-close stale positions**: v3.5.x aggressive mode — force-close positions older than
+  1 hour (configurable via `risk.max_position_age_sec`, default 1800s = 30 min).
+
+---
+
 ## [3.4.4] — 2026-06-27 (Kimi + Arena audit fixes — strategy stats sync + latency_arb)
 
 Based on dual audit by **Kimi AI** and **Arena.ai Agent Mode**.
