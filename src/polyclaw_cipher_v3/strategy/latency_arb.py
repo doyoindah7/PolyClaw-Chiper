@@ -92,36 +92,25 @@ class LatencyArbStrategy(BaseStrategy):
         return None, None
 
     def _implied_prob_above(self, current_price: float, threshold: float, asset: str, seconds_to_close: float) -> float:
-        """implied probability that asset will be ABOVE threshold at market close.
-
-        Uses time-weighted log-normal CDF model scaling with dynamic asset volatility.
-        """
+        """implied probability that asset will be ABOVE threshold at market close."""
         if current_price <= 0 or threshold <= 0:
             return 0.5
 
-        # 1. Get daily volatility from Binance WS feed
         vol_daily = 0.04  # default fallback (4% daily)
         if self._binance and hasattr(self._binance, "get_volatility_daily"):
             vol_daily = self._binance.get_volatility_daily(asset)
 
-        # 2. Scale volatility to remaining time
-        # Express time to close in days (min 1 minute to prevent divide-by-zero/infinite vol)
         days_to_close = max(1.0 / 1440.0, seconds_to_close / 86400.0)
 
         from math import sqrt, log, erf
-        # Standard deviation over remaining time
         sigma = vol_daily * sqrt(days_to_close)
 
-        # 3. Calculate probability using CDF of log-normal
-        # d = log(S/K) / sigma
-        # prob = CDF(d)
         try:
             d = log(current_price / threshold) / sigma
             prob = 0.5 * (1.0 + erf(d / sqrt(2.0)))
         except (ValueError, ZeroDivisionError):
             prob = 0.5
 
-        # Clip to avoid extreme 0.0 or 1.0
         return max(0.01, min(0.99, prob))
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
@@ -133,15 +122,14 @@ class LatencyArbStrategy(BaseStrategy):
         # Only crypto markets with threshold structure
         asset, threshold = self._extract_threshold(market)
         
-        # v3.5.2: Enhanced debug logging
         if not market.crypto_asset:
             self._skip_no_crypto += 1
             return None
         
         if not asset or not threshold:
             self._skip_no_threshold += 1
-            # v3.5.2: Log crypto markets without threshold pattern
-            logger.debug(
+            # v3.5.2: Log crypto markets without threshold pattern (INFO level)
+            logger.info(
                 "LATENCY_ARB SKIP: crypto_asset=%s but NO threshold pattern in: %s",
                 market.crypto_asset, market.question[:80],
             )
@@ -151,7 +139,7 @@ class LatencyArbStrategy(BaseStrategy):
         binance_price = self._binance.get_price(asset)
         if binance_price <= 0:
             self._skip_no_binance += 1
-            logger.debug(
+            logger.info(
                 "LATENCY_ARB SKIP: %s Binance price=0 (asset not tracked?)",
                 asset,
             )
@@ -163,7 +151,6 @@ class LatencyArbStrategy(BaseStrategy):
         if yes_price_pm <= 0 and no_price_pm <= 0:
             self._skip_no_pm_price += 1
             return None
-        # Default to mid if no CLOB data
         if yes_price_pm <= 0:
             yes_price_pm = market.yes_price
         if no_price_pm <= 0:
@@ -188,17 +175,15 @@ class LatencyArbStrategy(BaseStrategy):
         if sec_to_close < self.exit_before_close_sec:
             return None
 
-        # Compute implied probability from Binance (time-weighted CDF)
+        # Compute implied probability from Binance
         implied_prob = self._implied_prob_above(binance_price, threshold, asset, sec_to_close)
 
-        # Edge: difference between implied and PM price
-        # If implied > PM YES price → BUY YES (PM underpricing YES)
-        # If (1 - implied) > PM NO price → BUY NO (PM underpricing NO)
+        # Edge calculation
         edge_yes = (implied_prob - yes_price_pm) * 100  # in percentage points
         edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
 
-        # v3.5.2: Enhanced logging for all evaluated crypto markets (not just edge > 0.5)
-        logger.debug(
+        # v3.5.2: Log ALL evaluated crypto markets at INFO level
+        logger.info(
             "LATENCY_ARB EVAL: %s=$%.0f threshold=$%.0f | implied=%.1f%% YES=%.3f NO=%.3f | "
             "edge_yes=%+.2f%% edge_no=%+.2f%% | min_edge=%.1f%% | %s",
             asset, binance_price, threshold, implied_prob * 100,
