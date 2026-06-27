@@ -155,6 +155,18 @@ class TradeRepository:
         )
         return int(row["cnt"]) if row else 0
 
+    async def total_signals_count(self) -> int:
+        """v3.4.4: Total signals count from DB (survives restart)."""
+        row = await self.db.fetchone("SELECT COUNT(*) AS cnt FROM signals")
+        return int(row["cnt"]) if row else 0
+
+    async def signals_count_per_strategy(self) -> dict[str, int]:
+        """v3.4.4: Signals count per strategy from DB (survives restart)."""
+        rows = await self.db.fetchall(
+            "SELECT strategy, COUNT(*) AS cnt FROM signals GROUP BY strategy"
+        )
+        return {r["strategy"]: int(r["cnt"]) for r in rows} if rows else {}
+
 
 class SignalRepository:
     def __init__(self, db):

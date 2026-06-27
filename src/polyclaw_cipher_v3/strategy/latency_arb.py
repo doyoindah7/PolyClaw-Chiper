@@ -100,6 +100,12 @@ class LatencyArbStrategy(BaseStrategy):
         # Only crypto markets with threshold structure
         asset, threshold = self._extract_threshold(market)
         if not asset or not threshold:
+            # v3.4.4: Debug — log when crypto market exists but no threshold pattern found
+            if market.crypto_asset:
+                logger.debug(
+                    "LATENCY_ARB SKIP: crypto_asset=%s but no threshold pattern in: %s",
+                    market.crypto_asset, market.question[:60],
+                )
             return None
 
         # Get Binance price
@@ -143,6 +149,17 @@ class LatencyArbStrategy(BaseStrategy):
         # If (1 - implied) > PM NO price → BUY NO (PM underpricing NO)
         edge_yes = (implied_prob - yes_price_pm) * 100  # in percentage points
         edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
+
+        # v3.4.4: Debug logging to track why latency_arb fires or not (Kimi audit #3)
+        max_edge = max(edge_yes, edge_no)
+        if max_edge > 0.5:  # Log when edge > 0.5% (interesting but maybe below threshold)
+            logger.debug(
+                "LATENCY_ARB EVAL: %s=$%.0f threshold=$%.0f | implied=%.1f%% YES=%.3f NO=%.3f | "
+                "edge_yes=%+.2f%% edge_no=%+.2f%% | min_edge=%.1f%% | %s",
+                asset, binance_price, threshold, implied_prob * 100,
+                yes_price_pm, no_price_pm, edge_yes, edge_no,
+                self.min_edge_pct, market.question[:50],
+            )
 
         if edge_yes >= self.min_edge_pct and edge_yes > edge_no:
             side = Side.YES

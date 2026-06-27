@@ -281,6 +281,18 @@ class PolyClawCipherV3:
                 logger.warning("Strategy %s error on %s: %s", strat.name, market.condition_id[:8], e)
 
     async def _execute_signal(self, signal: Signal, market: Market, strat: Any) -> None:
+        # v3.4.4 FIX (Kimi audit #4): Cap signal size to max_position_pct BEFORE execution
+        # Was: signal.suggested_size_usd could exceed per-strategy cap, causing reject
+        strategy_cap_pct = self.risk.get_strategy_capital_pct(strat.name)
+        max_notional = self.wallet.bankroll * strategy_cap_pct
+        if signal.suggested_size_usd > max_notional:
+            logger.info(
+                "Signal size capped: $%.2f → $%.2f (max_position_pct=%.0f%%, bankroll=$%.2f)",
+                signal.suggested_size_usd, max_notional, strategy_cap_pct * 100,
+                self.wallet.bankroll,
+            )
+            signal = signal.model_copy(update={"suggested_size_usd": round(max_notional, 2)})
+
         # Final risk check
         can_trade, reason = self.risk.can_trade(strat.name, self.wallet.bankroll)
         if not can_trade:
@@ -484,7 +496,11 @@ class PolyClawCipherV3:
         return stats
 
     def _build_stats_sync(self) -> dict[str, Any]:
-        """Build minimal stats without DB access (fallback)."""
+        """Build minimal stats without DB access (fallback for cold start).
+
+        v3.4.4 FIX (Arena audit): Added default values for trades/wins/losses/signals
+        so Prometheus metrics and API don't show 0 before _refresh_stats_loop runs.
+        """
         snap = self.wallet.snapshot()
         snap["mode"] = self.config.get("bot", {}).get("mode", "paper")
         snap["markets"] = len(self._markets)
@@ -501,6 +517,16 @@ class PolyClawCipherV3:
             "binance_connected": self.binance_feed.connected,
             "binance_reconnects": self.binance_feed.reconnect_count,
         }
+        # v3.4.4: Default values for cold start (before _refresh_stats_loop populates from DB)
+        snap["trades"] = 0
+        snap["wins"] = 0
+        snap["losses"] = 0
+        snap["win_rate"] = 0.0
+        snap["signals"] = 0
+        snap["arbs"] = 0
+        snap["deployed"] = 0.0
+        snap["open_positions"] = []
+        snap["recent_trades"] = []
         return snap
 
     async def _refresh_stats_loop(self) -> None:
@@ -551,8 +577,23 @@ class PolyClawCipherV3:
                 stats["wins"] = trade_stats["wins"]
                 stats["losses"] = trade_stats["losses"]
                 stats["win_rate"] = trade_stats["win_rate"]
-                stats["signals"] = await self.trade_repo.recent_signals_count(time.time() - 3600)
+                stats["signals"] = await self.trade_repo.total_signals_count()
                 stats["arbs"] = 0
+
+                # v3.4.4 FIX (Kimi+Arena audit): Override ALL strategy stats from DB
+                # In-memory counters reset to 0 on every restart — DB is source of truth
+                db_signal_counts = await self.trade_repo.signals_count_per_strategy()
+                db_strat_stats = await self.trade_repo.per_strategy_stats()
+                db_strat_map = {s["name"]: s for s in db_strat_stats}
+                for s in stats["strategies"]:
+                    s["signals_emitted"] = db_signal_counts.get(s["name"], 0)
+                    if s["name"] in db_strat_map:
+                        db = db_strat_map[s["name"]]
+                        s["trades"] = db["trades"]
+                        s["wins"] = db["wins"]
+                        s["losses"] = db["losses"]
+                        s["win_rate"] = db["win_rate"]
+                        s["pnl"] = db["pnl"]
 
                 # WALLET INVARIANT CHECK (BUG-1 fix):
                 # bankroll MUST == cash + total_invested. If not, recalculate from DB truth.

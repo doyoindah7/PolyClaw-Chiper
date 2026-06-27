@@ -22,7 +22,7 @@ market:
 strategies:
   latency_arb:
     enabled: true
-    min_edge_pct: 2.0                 # Min gap Binance-implied vs PM price
+    min_edge_pct: 1.0                 # v3.4.4: lowered from 2.0→1.5→1.0 (Kimi+Arena audit — PM efficient, 2% never fires)
     max_position_pct: 0.25            # 25% bankroll per trade (aggressive)
     max_positions: 3
     take_profit_pct: 5.0
