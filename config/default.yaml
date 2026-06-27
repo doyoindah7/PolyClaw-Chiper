@@ -1,6 +1,6 @@
 # PolyClaw-Cipher v3 — Aggressive Growth Config
 # Target: $25 → aggressive compounding via 5-strategy HFT approach
-# Optimized for: t2.small (2GB RAM) VPS, runs alongside v2
+# Optimized for: t2.small (2GB RAM) VPS — v2 stopped, v3 only
 
 bot:
   mode: paper
@@ -58,6 +58,9 @@ strategies:
     # TP/SL exit (NEW — previously hold to resolution only)
     stop_loss_pct: 10.0               # Exit if odds drop -10% from entry (cut losses)
     take_profit_pct: 15.0             # Exit if odds rise +15% (take early profit)
+    # Category filter — skip random-outcome markets (sports = upset risk)
+    skip_random_outcome: true
+    allowed_categories: ["crypto", "economics", "other"]
 
   # === STRATEGY 4: MOMENTUM (refined v2 universal) ===
   # Uses CLOB WS for 60x faster reaction
@@ -73,8 +76,11 @@ strategies:
     max_position_pct: 0.15
     max_positions: 3
     cooldown_sec: 30
-    min_entry_price: 0.05
+    min_entry_price: 0.30            # FIX: raised from 0.05 — skip low-prob entries
     max_entry_price: 0.95
+    # Category filter — skip random-outcome markets (sports win/lose/draw)
+    skip_random_outcome: true
+    allowed_categories: ["crypto", "sports_derivative", "economics", "other"]
 
   # === STRATEGY 5: NEWS LLM (DEFERRED — no API key yet) ===
   # Stub interface ready, autoclaw will activate
@@ -132,9 +138,9 @@ risk:
 
   sizer:
     type: "aggressive_compounding"
-    cash_min_pct: 0                   # 100% deployment
+    cash_min_pct: 10                  # Keep 10% cash buffer for new entries
     max_pct_per_trade: 0.25
-    min_position_usd: 1.00
+    min_position_usd: 2.00
 
 # === EXECUTION — Paper Trading ===
 execution:

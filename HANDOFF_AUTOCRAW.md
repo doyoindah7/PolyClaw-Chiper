@@ -5,43 +5,71 @@
 >
 > Dibuat oleh: Z.ai Code (sesi 2026-06-27)
 > Target pembaca: autoclaw agent
-> Status v3 saat handoff: **v3.1.0 — v2 stopped, dashboard v3-only, strategy hardening done**
+> Status v3 saat handoff: **v3.2.0 — market category filter + atomic_arb pair fix done**
 
 ---
 
-## 1. Status Saat Ini (Snapshot v3.1.0)
+## 1. Status Saat Ini (Snapshot v3.2.0)
 
 ### ✅ Yang sudah jalan
-- **Bot v3.1.0** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
+- **Bot v3.2.0** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
 - **4 strategi aktif:** `latency_arb`, `atomic_arb`, `resolution_snipe`, `momentum`
 - **WebSocket feeds:** Binance (BTC/ETH/SOL) + Polymarket CLOB (36 tokens, real-time)
-- **Dashboard v3-only** di http://3.107.53.103:8082/ (public, auto-refresh 5s)
+- **Dashboard v3-only** di http://3.107.53.103:8082/ (public, auto-refresh 5s, title "v3.2.0")
 - **SQLite WAL** state, async paper executor, risk manager dengan per-strategy budget
 - **Daemon** dengan exponential backoff + health check (fixed restart loop)
 - **Wallet invariant check** — bankroll == cash + invested, verified every 3s
 - **v2 STOPPED** — source code kept at `/home/ubuntu/polyclaw-cipher/` for docs
+- **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
+
+### 🆕 Baru di v3.2.0 (vs v3.1.0)
+- **Market category classification** — 6 kategori (sports_match, sports_derivative, politics, economics, crypto, entertainment)
+  - `classify_market()` function di `core/types.py`
+  - `Market.classify()` method + `is_random_outcome` property
+  - Market categories logged di scan output
+- **Category filter untuk momentum & resolution_snipe** — skip random-outcome markets
+  - Momentum: allows crypto, sports_derivative (O/U goals predictable), economics, other
+  - Resolution_snipe: HANYA crypto, economics, other (skip ALL sports)
+  - Fix bug v3.1.0: "Will Spain win?" NO @ 0.2556 → -99.6% loss
+- **Atomic_arb pair execution fix** — executor creates BOTH legs (YES + NO)
+  - `take_pair_sibling()` method returns second position
+  - Bot persists sibling + debits wallet untuk kedua legs
+  - Previously only first leg created (not real arbitrage)
+- **Cash buffer** — `cash_min_pct: 0 → 10` (keep 10% cash for new entries)
+  - Fix bug v3.1.0: bot stuck at $0.15 cash (99.4% deployed, couldn't trade)
+- **min_entry_price raised** — `0.05 → 0.30` (skip low-probability entries)
+- **Strategy stats fix** — `_find_strategy()` None-safe + debug logging
 
 ### 🆕 Baru di v3.1.0 (vs v3.0.0)
-- **v2 stopped** — semua resource VPS fokus ke v3
-- **Dashboard v3-only** — full width, 6 KPI cards, unrealized P&L column, detailed
-- **atomic_arb threshold lowered** 100 → 40 bps (Polymarket arbs are 20-50 bps)
-- **resolution_snipe stop-loss + take-profit** — SL -10%, TP +15% (previously hold-only)
-- **CLOB WS fix** — 36 tokens subscribed (was 1, all strategies were blind)
-- **Wallet invariant check** — auto-recalculate if inconsistency detected
-- **Daemon health check fix** — uses 127.0.0.1 (0.0.0.0 invalid for connect)
-- **Binance WS tuple bug fix** — stats cache now refreshes properly
+- v2 stopped, all resources to v3
+- Dashboard v3-only (full width, 6 KPI cards, unrealized P&L)
+- atomic_arb threshold lowered 100 → 40 bps
+- resolution_snipe stop-loss + take-profit
+- CLOB WS fix (36 tokens, was 1)
+- Wallet invariant check
+- Daemon + Binance WS bug fixes
 
 ### ⏸️ Yang di-stub (tunggu autoclaw aktifkan)
 - **`news_llm` strategy** — interface siap, butuh z-ai-web-dev-sdk + API key
-- **`resolution_snipe` LLM mode** — sekarang threshold-only, LLM hook ready
-- **Telegram alerts** — stub (user skip sementara)
-- **Prometheus metrics** — `/metrics` endpoint ada tapi kosong
+- **`resolution_snipe` LLM mode** — sekarang threshold-only + category filter, LLM hook ready
+- **Telegram alerts** — stub di `alerts/__init__.py`
+- **Prometheus metrics** — endpoint `/metrics` ada tapi kosong
 - **Tests** — belum ada (pytest infrastructure ready di pyproject.toml)
 
-### ❌ Yang senggada tidak diimplementasi
+### ⏸️ Pending dari V31_ANALYSIS.md (v3.2.0 remaining)
+- **MASALAH-6: 0 crypto Up/Down detection** — scanner timing issue
+  - Crypto markets resolve cepat, scan 60s kadang miss
+  - Fix: scan lebih sering untuk crypto-specific, atau relax filter
+- **MASALAH-8: sync_connections() setiap 60s** — disruptive
+  - Cancel + respawn = gap data beberapa detik
+  - Fix: only sync kalau token list actually berubah (compare IDs, bukan count)
+- **MEDIUM-2: Event bus tidak dipakai strategi** — pull-based 1s, target <50ms
+  - latency_arb should subscribe ke `binance_tick`
+  - momentum should subscribe ke `clob_tick`
+
+### ❌ Yang sengaja tidak diimplementasi
 - Live trading (paper only — `BOT_MODE=paper` hard-coded mindset)
 - Cross-venue arbitrage (Kalshi/PredictIt) — v4
-- Git repository (user bilang "nanti aja")
 
 ---
 
@@ -533,11 +561,11 @@ curl http://localhost:8080/api/stats
 
 - **VPS:** 3.107.53.103 (AWS t2.small, Ubuntu)
 - **SSH:** `ssh -i ~/.ssh/t2small.pem ubuntu@3.107.53.103`
-- **v3 location:** `/home/ubuntu/polyclaw-cipher-v3/` (current, running)
+- **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
+- **v3 location:** `/home/ubuntu/polyclaw-cipher-v3/` (current, running v3.2.0)
 - **v3 port:** 0.0.0.0:8082 (public access)
-- **v3 dashboard:** `http://3.107.53.103:8082/` (v3-only, auto-refresh 5s)
+- **v3 dashboard:** `http://3.107.53.103:8082/` (v3.2.0, auto-refresh 5s)
 - **v2 location:** `/home/ubuntu/polyclaw-cipher/` (STOPPED, source kept for docs)
-- **v2 container:** `polyclaw-cipher` (stopped, restart=no)
 
 **Catatan:** v2 punya bug kritis (fake resolution, blocking executor, dll) yang
 sudah diperbaiki di v3. Jangan copy pattern dari v2 — lihat `ARCHITECTURE.md`

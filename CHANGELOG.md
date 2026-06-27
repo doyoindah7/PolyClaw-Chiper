@@ -5,6 +5,82 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.2.0] — 2026-06-27 (Session: market category filter + atomic_arb pair fix)
+
+### ✨ Added
+- **Market category classification system** (`core/types.py`):
+  - 6 categories: `sports_match`, `sports_derivative`, `politics`, `economics`, `crypto`, `entertainment`
+  - `CATEGORY_PATTERNS` dict dengan regex patterns untuk klasifikasi otomatis
+  - `classify_market(question)` function — standalone classifier
+  - `Market.classify()` method — cached classification
+  - `Market.is_random_outcome` property — True untuk sports_match + entertainment
+  - `Market.market_category` field — stored di parse time
+- **Category filter untuk momentum & resolution_snipe**:
+  - `skip_random_outcome: true` config
+  - `allowed_categories` list config
+  - Momentum: allows crypto, sports_derivative (O/U goals predictable), economics, other
+  - Resolution_snipe: HANYA crypto, economics, other (skip ALL sports — upset risk)
+- **Atomic_arb pair execution** (`execution/paper.py`):
+  - `take_pair_sibling()` method — returns second position untuk pair signals
+  - Executor sekarang creates BOTH legs (YES + NO) untuk atomic_arb
+  - Pair shares calculated dari `combined_ask` (same shares on both sides)
+  - If any leg fails fill, entire pair rejected (atomic)
+- **Bot pair sibling handling** (`bot.py`):
+  - Setelah `execute_entry()`, cek `take_pair_sibling()` untuk second position
+  - Persist sibling position ke DB + debit wallet + register entry di strategy
+  - Log: "PAIR SIBLING: YES/NO @ price | $invested"
+- **Market categories logging** di scan cycle:
+  - `Counter(m.classify() for m in self._markets)` — tampilkan kategori breakdown
+  - Example: `categories: {'sports_match': 126, 'other': 111, 'crypto': 9, ...}`
+
+### 🔧 Changed
+- **`cash_min_pct: 0 → 10`** — keep 10% cash buffer untuk new entries
+  - Reason: v3.1.0 bot got stuck at $0.15 cash (99.4% deployed, couldn't trade)
+  - With 10% buffer, selalu ada room untuk entry baru setelah profit close
+- **`min_entry_price: 0.05 → 0.30`** (momentum)
+  - Reason: skip low-probability entries yang sering loss
+  - v3.1.0 ada "Will Spain win?" NO @ 0.2556 → turun ke $0.001 = -99.6% loss
+  - 0.30 = skip market dengan odds < 30% (terlalu risky untuk momentum)
+- **`min_position_usd: 1.00 → 2.00`** — minimum trade size raised
+- **Strategy stats tracking improved** (`bot.py`):
+  - `_find_strategy()` sekarang None-safe (handles empty name)
+  - Debug logging kalau strategy name tidak ditemukan
+- **Config comment updated** — "runs alongside v2" → "v2 stopped, v3 only"
+
+### 🐛 Fixed
+- **MASALAH-1 (V31_ANALYSIS.md): 99.4% cash deployed** — bot terkunci
+  - Fix: `cash_min_pct: 10` ensures 10% cash buffer always available
+- **MASALAH-2 (V31_ANALYSIS.md): Momentum masuk sports market** — sama seperti bug v2
+  - Fix: Category filter skip `sports_match` dan `entertainment`
+  - Sports winner/draw = random outcome, momentum tidak punya edge
+- **MASALAH-3 (V31_ANALYSIS.md): "Will Spain win?" NO @ 0.2556 → -99.6% loss
+  - Fix: `min_entry_price: 0.30` skip entries di bawah 30%
+- **MASALAH-4 (V31_ANALYSIS.md): Atomic_arb single-leg** — bukan arbitrage real
+  - Fix: Executor creates BOTH legs via `take_pair_sibling()`
+  - Bot persists sibling position + debits wallet untuk kedua legs
+- **MASALAH-5 (V31_ANALYSIS.md): Resolution_snipe di sports market**
+  - Fix: Category filter — hanya snipe crypto/economics/other (deterministic resolution)
+- **MASALAH-7 (V31_ANALYSIS.md): Strategy stats semua 0**
+  - Fix: `_find_strategy()` None-safe + debug logging
+
+### 📊 Verified Working (post-deploy)
+- Container healthy, uptime 8+ menit
+- Market categories logged: sports_match=126, sports_derivative=30, crypto=9, economics=15, politics=6, entertainment=3, other=111
+- Bankroll: $25.00, cash: $19.47 (77% idle — cash buffer working)
+- 4 signals emitted, 1 open position, 0 closed trades (new session)
+- 0 errors in logs
+
+### ⏸️ Still Pending (MASALAH yang belum fix)
+- **MASALAH-6: 0 crypto Up/Down detection** — scanner timing issue
+  - Crypto markets resolve cepat, scan 60s kadang miss
+  - Fix needed: scan lebih sering untuk crypto-specific markets, atau relax filter
+- **MASALAH-8: sync_connections() setiap 60s** — disruptive
+  - Cancel + respawn connections = gap data beberapa detik
+  - Fix needed: only sync kalau token list actually berubah (compare IDs, bukan count)
+- **MEDIUM-2: Event bus masih tidak dipakai strategi** — pull-based 1s, target <50ms
+
+---
+
 ## [3.1.0] — 2026-06-27 (Session: v2 sunset + strategy hardening)
 
 ### 🗑️ Removed
@@ -118,17 +194,18 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ## Pending (for autoclaw / future sessions)
 
-### From V3_REVISED_TARGET.md (Week 1 remaining)
-- ⏸️ Connect strategies to event bus (currently pull-based, 1s loop)
-  - latency_arb should subscribe to `binance_tick` topic
-  - momentum should subscribe to `clob_tick` topic
-  - Target: <50ms reaction vs current 1s
+### From V31_ANALYSIS.md (v3.2.0 remaining)
+- ⏸️ **MASALAH-6: Fix 0 crypto Up/Down detection** — scanner timing issue
+  - Scan crypto markets lebih sering, atau relax filter
+- ⏸️ **MASALAH-8: Optimize sync_connections()** — only sync when token list actually changes
+  - Compare actual token IDs, bukan hanya count
+- ⏸️ **MEDIUM-2: Connect strategies ke event bus** — currently pull-based 1s, target <50ms
 
 ### From V3_REVISED_TARGET.md (Week 2-4)
 - ⏸️ Improve `_implied_prob_above()` — add time decay + volatility model
 - ⏸️ Add BNB/XRP/DOGE to Binance feed
 - ⏸️ Implement Telegram alerts (currently stub)
-- ⏸️ Market category filter for momentum (skip sports, focus on predictable)
+- ✅ ~~Market category filter for momentum~~ — DONE in v3.2.0
 
 ### From V3_REVISED_TARGET.md (Week 3-5)
 - ⏸️ Implement LLM agent (news_llm strategy)

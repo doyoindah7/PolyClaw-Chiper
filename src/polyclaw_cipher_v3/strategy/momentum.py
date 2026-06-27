@@ -1,7 +1,9 @@
 """Momentum strategy — refined v2 universal, uses CLOB WS for 60x faster reaction.
 
-Multi-timeframe: 30s + 2m confirmation.
-TP 8% / SL 4% / max hold 5 minutes.
+v3.2.0 FIXES:
+- Added market category filter: skip random-outcome markets (sports_match, entertainment)
+- Raised min_entry_price 0.05 -> 0.30 (skip low-probability entries that often lose)
+- This fixes the sports market bug that caused -99.6% loss on "Will Spain win?" NO @ 0.2556
 """
 from __future__ import annotations
 
@@ -30,11 +32,14 @@ class MomentumStrategy(BaseStrategy):
         self.max_hold_sec = c.get("max_hold_sec", 300)
         self.max_positions = c.get("max_positions", 3)
         self.cooldown_sec = c.get("cooldown_sec", 30)
-        self.min_entry_price = c.get("min_entry_price", 0.05)
+        self.min_entry_price = c.get("min_entry_price", 0.30)  # FIX: raised from 0.05
         self.max_entry_price = c.get("max_entry_price", 0.95)
         self.max_notional_pct = c.get("max_notional_pct", 0.15)
         self.min_confidence = c.get("min_confidence", 0.40)
         self.max_volatility = c.get("max_volatility", 0.08)
+        # FIX: Category filter — skip random-outcome markets
+        self.skip_random_outcome = c.get("skip_random_outcome", True)
+        self.allowed_categories = c.get("allowed_categories", ["crypto", "sports_derivative", "economics", "other"])
         self._clob = clob_feed
         self._entry_prices: dict[str, float] = {}
         self._entry_times: dict[str, float] = {}
@@ -44,6 +49,14 @@ class MomentumStrategy(BaseStrategy):
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         if not self._clob:
+            return None
+
+        # FIX: Category filter — skip random-outcome markets
+        # Sports match winner, entertainment = no momentum edge
+        if self.skip_random_outcome and market.is_random_outcome:
+            return None
+        cat = market.classify()
+        if self.allowed_categories and cat not in self.allowed_categories:
             return None
 
         # Filters
@@ -83,7 +96,6 @@ class MomentumStrategy(BaseStrategy):
         max_change_short = max(abs(yes_change_short), abs(no_change_short))
         max_change_long = max(abs(yes_change_long), abs(no_change_long))
 
-        # Both timeframes must agree (trend confirmation)
         if max_change_short < self.min_momentum_short_pct:
             return None
         if max_change_long < self.min_momentum_long_pct:
@@ -109,12 +121,12 @@ class MomentumStrategy(BaseStrategy):
         if confidence < self.min_confidence:
             return None
 
-        # Volatility check (adaptive)
+        # Volatility check
         vol = self._clob.get_volatility(token_id, 120.0)
         if vol > self.max_volatility:
             return None
         elif vol > 0.04:
-            confidence *= 0.9  # Mild penalty
+            confidence *= 0.9
 
         # Position size
         bankroll = context.get("bankroll", 25.0)
@@ -144,9 +156,9 @@ class MomentumStrategy(BaseStrategy):
         self.signals_emitted += 1
 
         logger.info(
-            "MOMENTUM SIGNAL: %s %s | short=%+.2f%% long=%+.2f%% | conf=%.2f | $%.2f | %s",
+            "MOMENTUM SIGNAL: %s %s | short=%+.2f%% long=%+.2f%% | cat=%s | conf=%.2f | $%.2f | %s",
             side.value, direction, max_change_short, max_change_long,
-            confidence, notional, market.question[:50],
+            cat, confidence, notional, market.question[:50],
         )
 
         return Signal(
@@ -155,7 +167,7 @@ class MomentumStrategy(BaseStrategy):
             suggested_price=entry_price,
             suggested_size_usd=notional,
             confidence=confidence,
-            reason=f"Momentum: {direction} short={change:+.2f}% long={yes_change_long:+.2f}% vol={vol:.3f}",
+            reason=f"Momentum: {direction} short={change:+.2f}% long={yes_change_long:+.2f}% vol={vol:.3f} cat={cat}",
             strategy_name=self.name,
             token_id=token_id,
             timestamp=now,

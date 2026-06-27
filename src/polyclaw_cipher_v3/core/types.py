@@ -1,6 +1,10 @@
-"""Core type definitions — Pydantic v2 models."""
+"""Core type definitions — Pydantic v2 models.
+
+v3.2.0: Added market_category for strategy filtering.
+"""
 from __future__ import annotations
 
+import re
 from datetime import datetime, UTC
 from enum import Enum
 from typing import Any
@@ -11,6 +15,73 @@ from pydantic import BaseModel, ConfigDict, Field
 class Side(str, Enum):
     YES = "YES"
     NO = "NO"
+
+
+# --- Market Category Classification ---
+
+CATEGORY_PATTERNS = {
+    "sports_match": [
+        re.compile(r"Will\s+.+\s+win\s+on\s+\d{4}", re.IGNORECASE),
+        re.compile(r"Will\s+.+\s+lose\s+on\s+\d{4}", re.IGNORECASE),
+        re.compile(r"end\s+in\s+a\s+draw", re.IGNORECASE),
+        re.compile(r"^Will\s+[A-Z][a-z]+\s+win\b", re.IGNORECASE),
+        re.compile(r"vs\.?\s+.+\s+(win|lose|draw)", re.IGNORECASE),
+    ],
+    "sports_derivative": [
+        re.compile(r"O/U\s+\d", re.IGNORECASE),
+        re.compile(r"Over/Under\s+\d", re.IGNORECASE),
+        re.compile(r"spread", re.IGNORECASE),
+        re.compile(r"handicap", re.IGNORECASE),
+        re.compile(r"total\s+(points|goals|runs)", re.IGNORECASE),
+    ],
+    "politics": [
+        re.compile(r"election", re.IGNORECASE),
+        re.compile(r"president", re.IGNORECASE),
+        re.compile(r"senate", re.IGNORECASE),
+        re.compile(r"congress", re.IGNORECASE),
+        re.compile(r"governor", re.IGNORECASE),
+        re.compile(r"prime\s+minister", re.IGNORECASE),
+        re.compile(r"legislation|bill|policy|veto", re.IGNORECASE),
+        re.compile(r"Republican|Democrat", re.IGNORECASE),
+    ],
+    "economics": [
+        re.compile(r"CPI|inflation", re.IGNORECASE),
+        re.compile(r"GDP", re.IGNORECASE),
+        re.compile(r"Fed\s+(rate|cut|hike|pause)", re.IGNORECASE),
+        re.compile(r"interest\s+rate", re.IGNORECASE),
+        re.compile(r"unemployment", re.IGNORECASE),
+        re.compile(r"nonfarm|non-farm|NFP", re.IGNORECASE),
+        re.compile(r"recession", re.IGNORECASE),
+        re.compile(r"treasury\s+yield", re.IGNORECASE),
+    ],
+    "crypto": [
+        re.compile(r"BTC|Bitcoin|ETH|Ethereum|SOL|Solana|BNB|XRP|DOGE|Dogecoin", re.IGNORECASE),
+    ],
+    "entertainment": [
+        re.compile(r"Oscar|Grammy|Emmy|Award", re.IGNORECASE),
+        re.compile(r"box\s+office", re.IGNORECASE),
+        re.compile(r"Billboard|chart", re.IGNORECASE),
+    ],
+}
+
+# Priority order: first match wins (more specific patterns first)
+CATEGORY_PRIORITY = [
+    "sports_derivative",  # Check BEFORE sports_match (O/U is derivative)
+    "sports_match",
+    "crypto",
+    "politics",
+    "economics",
+    "entertainment",
+]
+
+
+def classify_market(question: str) -> str:
+    """Classify market by question text. Returns category string."""
+    for cat in CATEGORY_PRIORITY:
+        for pat in CATEGORY_PATTERNS.get(cat, []):
+            if pat.search(question):
+                return cat
+    return "other"
 
 
 class Market(BaseModel):
@@ -33,10 +104,11 @@ class Market(BaseModel):
     volume_24h: float = 0.0
     liquidity: float = 0.0
     is_active: bool = True
-    is_closed: bool = False            # Real closed flag from Gamma API
-    resolved_by: list[str] = Field(default_factory=list)  # Winning token IDs
+    is_closed: bool = False
+    resolved_by: list[str] = Field(default_factory=list)
     crypto_asset: str | None = None
     window_minutes: int | None = None
+    market_category: str = ""
 
     @property
     def is_crypto_up_down(self) -> bool:
@@ -44,12 +116,10 @@ class Market(BaseModel):
 
     @property
     def is_resolved(self) -> bool:
-        """Real resolution check — uses `closed` AND `resolvedBy` fields."""
         return self.is_closed and len(self.resolved_by) > 0
 
     @property
     def winning_side(self) -> Side | None:
-        """Determine winning side from resolvedBy token IDs."""
         if not self.is_resolved:
             return None
         if self.yes_token_id in self.resolved_by:
@@ -64,16 +134,27 @@ class Market(BaseModel):
 
     @property
     def combined_ask(self) -> float:
-        """YES ask + NO ask — for arbitrage detection."""
         return self.yes_ask + self.no_ask
 
     @property
     def combined_mid(self) -> float:
         return self.yes_price + self.no_price
 
+    def classify(self) -> str:
+        """Compute and cache market category."""
+        if not self.market_category:
+            self.market_category = classify_market(self.question)
+        return self.market_category
+
+    @property
+    def is_random_outcome(self) -> bool:
+        """True if market is random-outcome (sports match winner, election result, etc).
+        These markets have NO momentum edge — outcome is binary random."""
+        cat = self.classify()
+        return cat in ("sports_match", "entertainment")
+
 
 class Leg(BaseModel):
-    """Single leg of a (potentially multi-leg) signal."""
     token_id: str
     side: Side
     price: float
@@ -81,12 +162,11 @@ class Leg(BaseModel):
 
 
 class Signal(BaseModel):
-    """Trading signal emitted by a strategy."""
     model_config = ConfigDict(frozen=False)
 
     id: str = ""
     market_condition_id: str
-    side: Side                          # Primary side (for single-leg)
+    side: Side
     suggested_price: float
     suggested_size_usd: float
     confidence: float
@@ -94,7 +174,6 @@ class Signal(BaseModel):
     strategy_name: str
     token_id: str = ""
     timestamp: float = 0.0
-    # Multi-leg support (for atomic arbitrage)
     legs: list[Leg] = Field(default_factory=list)
     is_pair: bool = False
 
@@ -106,7 +185,6 @@ class Signal(BaseModel):
         if not self.timestamp:
             import time
             self.timestamp = time.time()
-        # If legs not specified, build default single leg
         if not self.legs and self.token_id:
             self.legs = [Leg(
                 token_id=self.token_id,
@@ -117,7 +195,6 @@ class Signal(BaseModel):
 
 
 class Position(BaseModel):
-    """Open position."""
     model_config = ConfigDict(frozen=False)
 
     id: str
@@ -134,14 +211,12 @@ class Position(BaseModel):
     current_value: float = 0.0
     pnl_percent: float = 0.0
     pnl_dollar: float = 0.0
-    # Pair-trade support
     is_pair: bool = False
     pair_id: str = ""
     pair_sibling_id: str = ""
 
 
 class Trade(BaseModel):
-    """Closed trade (historical)."""
     model_config = ConfigDict(frozen=False)
 
     id: str
@@ -163,9 +238,8 @@ class Trade(BaseModel):
 
 
 class NewsEvent(BaseModel):
-    """News event from scraper (for LLM agent — deferred)."""
     id: str = ""
-    source: str                        # "nitter" / "rss" / "polymarket"
+    source: str
     headline: str
     body: str = ""
     url: str = ""
@@ -185,7 +259,6 @@ class NewsEvent(BaseModel):
 
 
 class TickUpdate(BaseModel):
-    """CLOB WS tick update."""
     token_id: str
     price: float
     best_bid: float = 0.0
@@ -200,8 +273,7 @@ class TickUpdate(BaseModel):
 
 
 class BinanceTick(BaseModel):
-    """Binance WS tick."""
-    symbol: str                        # "BTC" / "ETH" / "SOL"
+    symbol: str
     price: float
     volume: float = 0.0
     timestamp: float

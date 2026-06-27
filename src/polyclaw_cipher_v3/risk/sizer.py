@@ -15,7 +15,7 @@ class CompoundingSizer:
 
     def __init__(self, config: dict[str, Any] | None = None):
         c = config or {}
-        self.cash_min_pct = c.get("cash_min_pct", 0)
+        self.cash_min_pct = c.get("cash_min_pct", 10)
         self.max_pct_per_trade = c.get("max_pct_per_trade", 0.25)
         self.min_position_usd = c.get("min_position_usd", 1.0)
         # Confidence scaling: low conf = 0.6x, high conf = 1.3x

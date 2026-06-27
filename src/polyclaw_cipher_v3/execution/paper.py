@@ -1,4 +1,10 @@
-"""Async paper executor — fill-probability simulation, NO blocking calls."""
+"""Async paper executor — fill-probability simulation, NO blocking calls.
+
+v3.2.0 FIXES:
+- Pair signal support: creates BOTH legs for atomic_arb
+- take_pair_sibling() method for bot.py to get the second position
+- If any leg fails fill, entire pair is rejected (atomic)
+"""
 from __future__ import annotations
 
 import asyncio
@@ -15,11 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class PaperExecutor(BaseExecutor):
-    """Async paper executor.
-
-    Key fix vs v2: uses `await asyncio.sleep()` instead of `time.sleep()` —
-    non-blocking, event loop stays responsive.
-    """
+    """Async paper executor with pair-trade support."""
 
     def __init__(self, config: dict[str, Any] | None = None):
         c = config or {}
@@ -29,16 +31,18 @@ class PaperExecutor(BaseExecutor):
         self.fill_prob_at_bid_high = c.get("fill_probability_at_bid_high", 0.65)
         self.queue_factor = c.get("queue_position_factor", 0.6)
         self.latency_sec = c.get("simulated_latency_sec", 0.2)
+        # Pair sibling: for atomic arb, executor creates 2 positions
+        self._pair_sibling: Position | None = None
 
     async def execute_entry(
         self, signal: Signal, market_question: str, bankroll: float
     ) -> Position | None:
-        """Simulate order fill. NON-blocking."""
+        """Simulate order fill. NON-blocking. For pair signals, creates both legs."""
         # Async latency simulation (no time.sleep!)
         await asyncio.sleep(self.latency_sec)
 
         # Fill probability per leg
-        # For pair signals, each leg must fill independently
+        # For pair signals, ALL legs must fill (atomic)
         filled_legs = []
         for leg in signal.legs:
             if await self._simulate_fill(leg.price):
@@ -50,46 +54,93 @@ class PaperExecutor(BaseExecutor):
                     "Paper fill REJECTED: %s @ %.4f | %s",
                     leg.side.value, leg.price, market_question[:40],
                 )
-                return None  # If any leg fails, reject whole signal
+                # For pair signals: if ANY leg fails, reject entire pair
+                self._pair_sibling = None
+                return None
 
         if not filled_legs:
             return None
 
-        # Use first leg as primary position identifier
+        # Use first leg as primary position
         primary_leg, primary_price = filled_legs[0]
-        shares = signal.suggested_size_usd / primary_price
-        invested = shares * primary_price
+        primary_shares = signal.suggested_size_usd / primary_price if primary_price > 0 else 0
+        primary_invested = primary_shares * primary_price
         pos_id = uuid.uuid4().hex[:8]
+        pair_id = signal.id if signal.is_pair else ""
+
+        # For pair signals: calculate shares based on COMBINED ask
+        # shares = notional / combined_ask (same shares on both sides)
+        if signal.is_pair and len(filled_legs) >= 2:
+            combined_ask = primary_price + filled_legs[1][1]
+            if combined_ask > 0:
+                pair_shares = signal.suggested_size_usd / combined_ask
+            else:
+                pair_shares = primary_shares
+            primary_shares = pair_shares
+            primary_invested = pair_shares * primary_price
 
         pos = Position(
             id=pos_id,
             market_condition_id=signal.market_condition_id,
             market_question=market_question,
-            side=signal.side,
+            side=primary_leg.side,
             token_id=primary_leg.token_id,
             entry_price=primary_price,
-            shares=shares,
-            invested=invested,
+            shares=primary_shares,
+            invested=primary_invested,
             strategy=signal.strategy_name,
             opened_at=time.time(),
             current_price=primary_price,
-            current_value=invested,
+            current_value=primary_invested,
             is_pair=signal.is_pair,
-            pair_id=signal.id if signal.is_pair else "",
+            pair_id=pair_id,
         )
 
+        # For pair signals: create sibling position (second leg)
+        self._pair_sibling = None
+        if signal.is_pair and len(filled_legs) >= 2:
+            second_leg, second_price = filled_legs[1]
+            second_invested = primary_shares * second_price  # Same shares as primary
+            sibling_id = uuid.uuid4().hex[:8]
+
+            self._pair_sibling = Position(
+                id=sibling_id,
+                market_condition_id=signal.market_condition_id,
+                market_question=market_question,
+                side=second_leg.side,
+                token_id=second_leg.token_id,
+                entry_price=second_price,
+                shares=primary_shares,  # Same shares
+                invested=second_invested,
+                strategy=signal.strategy_name,
+                opened_at=time.time(),
+                current_price=second_price,
+                current_value=second_invested,
+                is_pair=True,
+                pair_id=pair_id,
+                pair_sibling_id=pos_id,
+            )
+            # Link primary to sibling
+            pos.pair_sibling_id = sibling_id
+
         logger.info(
-            "PAPER FILL: %s %s @ %.4f | %d shares | $%.2f | %s",
-            signal.strategy_name.upper(), signal.side.value, primary_price,
-            int(shares), invested, market_question[:50],
+            "PAPER FILL: %s %s @ %.4f | %d shares | $%.2f%s | %s",
+            signal.strategy_name.upper(), primary_leg.side.value, primary_price,
+            int(primary_shares), primary_invested,
+            " +PAIR" if self._pair_sibling else "",
+            market_question[:50],
         )
         return pos
 
+    def take_pair_sibling(self) -> Position | None:
+        """Get and clear the pending pair sibling position."""
+        sibling = self._pair_sibling
+        self._pair_sibling = None
+        return sibling
+
     async def _simulate_fill(self, price: float) -> bool:
         """Simulate fill probability based on bid level."""
-        # Normalize price from [0.05, 0.95] to [0.0, 1.0]
         norm = max(0.0, min(1.0, (price - 0.05) / 0.90))
-        # Higher price = lower fill probability (we're less competitive as maker)
         fill_prob = self.fill_prob_at_bid_low - norm * (
             self.fill_prob_at_bid_low - self.fill_prob_at_bid_high
         )

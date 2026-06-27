@@ -177,8 +177,11 @@ class PolyClawCipherV3:
             self._markets = await self.scanner.scan()
             self._last_scan = now
             crypto_markets = [m for m in self._markets if m.is_crypto_up_down]
-            logger.info("Markets: %d total, %d crypto Up/Down",
-                        len(self._markets), len(crypto_markets))
+            # Log market categories
+            from collections import Counter
+            cat_counts = Counter(m.classify() for m in self._markets)
+            logger.info("Markets: %d total, %d crypto Up/Down, categories: %s",
+                        len(self._markets), len(crypto_markets), dict(cat_counts))
 
             # Track top markets in CLOB WS (max 50 for t2.small)
             track_max = self.config.get("market", {}).get("track_max_markets", 50)
@@ -256,6 +259,18 @@ class PolyClawCipherV3:
         # Persist
         await self.position_repo.open_position(pos)
         await self.wallet.debit(pos.invested)
+
+        # FIX: Handle pair sibling (atomic_arb creates 2 legs)
+        sibling = self.executor.take_pair_sibling()
+        if sibling:
+            await self.position_repo.open_position(sibling)
+            await self.wallet.debit(sibling.invested)
+            # Register sibling entry in strategy
+            if hasattr(strat, "register_entry"):
+                strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
+            logger.info("PAIR SIBLING: %s %s @ %.4f | $%.2f", 
+                        sibling.side.value, sibling.entry_price, sibling.invested)
+
         await self.signal_repo.log_signal(signal, executed=True)
         self.risk.record_trade(strat.name, 0)  # Record entry (pnl=0)
 
@@ -343,9 +358,13 @@ class PolyClawCipherV3:
                 await self.position_repo.update_current_value(pos.id, current, current_value)
 
     def _find_strategy(self, name: str):
+        if not name:
+            return None
         for s in self.strategies:
             if s.name == name:
                 return s
+        # Debug: strategy name not found (might be from before restart)
+        logger.debug("Strategy not found: %s (active: %s)", name, [s.name for s in self.strategies])
         return None
 
     def _get_stats(self) -> dict[str, Any]:

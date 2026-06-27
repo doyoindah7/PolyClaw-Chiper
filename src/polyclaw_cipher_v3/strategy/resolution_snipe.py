@@ -1,11 +1,9 @@
 """Resolution sniping — buy near-certain markets at 0.90-0.97 discount.
 
-Edge: Market that's 99% certain to resolve YES (e.g., "Has Bitcoin reached $100k?"
-when BTC already at $105k) often trades at 0.93-0.97 because holders are lazy.
-Buy 0.95, hold to resolution, collect $1. Profit ~5% per trade.
-
-Threshold-only mode (LLM disabled until API key available).
-LLM-assisted version will be activated by autoclaw.
+v3.2.0 FIXES:
+- Added market category filter: skip sports_match and entertainment (random outcome)
+- Only snipe markets with deterministic resolution (crypto threshold, economics)
+- Sports markets can have upset = -93% loss in one event
 """
 from __future__ import annotations
 
@@ -33,16 +31,15 @@ class ResolutionSnipeStrategy(BaseStrategy):
         self.max_position_pct = c.get("max_position_pct", 0.15)
         self.max_concurrent = c.get("max_concurrent", 5)
         self.cooldown_sec = c.get("cooldown_sec", 60)
-        # Stop-loss / take-profit (added — previously hold-to-resolution only)
-        self.stop_loss_pct = c.get("stop_loss_pct", 10.0)   # Exit if odds drop -10% from entry
-        self.take_profit_pct = c.get("take_profit_pct", 15.0)  # Exit if odds rise +15% (early profit)
-        # LLM hook (deferred — autoclaw will inject)
+        self.stop_loss_pct = c.get("stop_loss_pct", 10.0)
+        self.take_profit_pct = c.get("take_profit_pct", 15.0)
+        # FIX: Category filter — only snipe predictable markets
+        self.skip_random_outcome = c.get("skip_random_outcome", True)
+        self.allowed_categories = c.get("allowed_categories", ["crypto", "economics", "other"])
         self._llm_client = None
-        # Entry price tracking for TP/SL
         self._entry_prices: dict[str, float] = {}
 
     def set_llm_client(self, llm_client) -> None:
-        """Inject LLM client (called by autoclaw when API key available)."""
         self._llm_client = llm_client
         self.llm_enabled = True
         logger.info("ResolutionSnipe: LLM client injected, LLM mode enabled")
@@ -50,6 +47,14 @@ class ResolutionSnipeStrategy(BaseStrategy):
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         # Skip closed markets
         if market.is_closed:
+            return None
+
+        # FIX: Category filter — skip random-outcome markets
+        # Sports match winner = unpredictable, can upset and lose -93%
+        if self.skip_random_outcome and market.is_random_outcome:
+            return None
+        cat = market.classify()
+        if self.allowed_categories and cat not in self.allowed_categories:
             return None
 
         # Hours to close
@@ -107,16 +112,14 @@ class ResolutionSnipeStrategy(BaseStrategy):
                 reasoning = f"LLM: {llm_result.reasoning}"
             except Exception as e:
                 logger.warning("LLM assess_near_certainty failed: %s, fallback to threshold", e)
-                confidence = 0.80  # Fallback
+                confidence = 0.80
                 reasoning = f"Threshold fallback (LLM error)"
         else:
-            # Threshold-only mode (no LLM)
-            # Conservative confidence based on odds proximity
-            # Higher odds = higher confidence (more certain)
+            # Threshold-only mode
             odds_range = self.max_odds - self.min_odds
             position_in_range = (entry_price - self.min_odds) / odds_range if odds_range > 0 else 0.5
-            confidence = 0.75 + position_in_range * 0.15  # 0.75 - 0.90
-            reasoning = f"Threshold: {near_certain_side}={entry_price:.3f}, {hours_to_close:.1f}h to close"
+            confidence = 0.75 + position_in_range * 0.15
+            reasoning = f"Threshold: {near_certain_side}={entry_price:.3f}, {hours_to_close:.1f}h to close, cat={cat}"
 
         # Position size
         bankroll = context.get("bankroll", 25.0)
@@ -146,9 +149,9 @@ class ResolutionSnipeStrategy(BaseStrategy):
         self.signals_emitted += 1
 
         logger.info(
-            "RESOLUTION SNIPE SIGNAL: %s %s @ %.3f | expected +%.1f%% at resolve | %dh to close | conf=%.2f $%.2f | %s",
+            "RESOLUTION SNIPE SIGNAL: %s %s @ %.3f | expected +%.1f%% | %dh | cat=%s | conf=%.2f $%.2f | %s",
             near_certain_side, side.value, entry_price, expected_profit_pct,
-            int(hours_to_close), confidence, notional, market.question[:50],
+            int(hours_to_close), cat, confidence, notional, market.question[:50],
         )
 
         return Signal(
@@ -157,23 +160,16 @@ class ResolutionSnipeStrategy(BaseStrategy):
             suggested_price=entry_price,
             suggested_size_usd=notional,
             confidence=confidence,
-            reason=f"ResolutionSnipe: {reasoning}, expected +{expected_profit_pct:.1f}%",
+            reason=f"ResolutionSnipe: {reasoning}, expected +{expected_profit_pct:.1f}%, cat={cat}",
             strategy_name=self.name,
             token_id=token_id,
             timestamp=now,
         )
 
     def register_entry(self, pos_id: str, condition_id: str, entry_price: float) -> None:
-        """Track entry price for TP/SL calculation."""
         self._entry_prices[pos_id] = entry_price
 
     def check_exit(self, pos_id: str, condition_id: str, current_price: float) -> tuple[bool, str]:
-        """Check TP/SL exit conditions.
-
-        Previously: hold to resolution only (no SL = unlimited downside if odds reverse).
-        Now: exit if odds drop -10% (SL) or rise +15% (TP — take early profit).
-        Market resolution still handled separately by bot via resolve_position().
-        """
         entry = self._entry_prices.get(pos_id)
         if entry is None or entry <= 0:
             return False, ""
@@ -185,5 +181,4 @@ class ResolutionSnipeStrategy(BaseStrategy):
         return False, ""
 
     def clear_position(self, pos_id: str, condition_id: str) -> None:
-        """Clean up entry tracking when position closes."""
         self._entry_prices.pop(pos_id, None)

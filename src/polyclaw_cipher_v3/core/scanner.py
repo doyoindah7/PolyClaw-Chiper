@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from ..core.types import Market
+from ..core.types import Market, classify_market
 from .resolution import parse_resolution
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,7 @@ class MarketScanner:
             is_closed=is_closed,
             resolved_by=resolved_by,
             crypto_asset=asset,
+            market_category=classify_market(question),
             window_minutes=window,
         )
 
