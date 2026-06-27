@@ -5,6 +5,38 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.3.1] — 2026-06-27 (Hotfix: atomic_arb category filter + sizer deadlock)
+
+Two bugs caught by **autoclaw** (AI agent review of v3.3.0 deployment).
+
+### 🐛 Fixed
+- **BUG: atomic_arb had NO category filter** — traded `sports_spread` (random outcome)
+  - Symptom: Bot traded "Spread: Belgium (-2.5)" via atomic_arb, locking $14.34 in gambling position
+  - Root cause: `atomic_arb.py` didn't implement `skip_random_outcome` / `allowed_categories`
+    (only momentum + resolution_snipe had category filter from v3.2.0)
+  - Fix: Added category filter to atomic_arb (same as other strategies)
+  - Config: `skip_random_outcome: true`, `allowed_categories: ["crypto", "sports_total", "economics", "politics", "other"]`
+
+- **BUG: Dynamic cash buffer created DEADLOCK** — bot stuck, couldn't trade
+  - Symptom: Cash $4.18 (8.7%), deployed 91.3% > 70% threshold → dynamic buffer forces
+    25% reserve = $11.98 → `deployable = max(0, 4.18 - 11.98) = 0` → sizer returns 0
+  - Impact: 3 resolution_snipe signals REJECTED, bot couldn't open new positions
+  - Root cause: Dynamic buffer logic (v3.3.0) was too aggressive — when over-deployed,
+    it blocked ALL new trades instead of allowing reduced-size entries
+  - Fix: Emergency mode in sizer — if `deployable < min_position_usd` AND `cash > min_position_usd`,
+    allow `deployable = cash * 0.5` (reduced trading, not blocked)
+  - Result: Bot can trade with ~$2.09 deployable (50% of $4.18 cash), high-confidence
+    signals (>0.8) execute with ~$2.42 notional. Bot stays active, generates TP/SL exits
+    to free cash naturally.
+
+### 📊 Context
+- Autoclaw reviewed v3.3.0 after deploy, caught 2 bugs that 4 AI reviewers (Z.ai + Claude + Lisa + Grok) all missed
+- Profit at time of fix: $47.91 (+91.7% from $25 initial)
+- 8 open positions (2 resolution_snipe + 3 atomic_arb pairs), $43.73 deployed
+- Cross-review between AI agents continues to be valuable
+
+---
+
 ## [3.3.0] — 2026-06-27 (Session: multi-AI review consensus — 8 fixes)
 
 Based on cross-review by 3 AI (Claude, Lisa/Qwen, Grok). All conflicts resolved via

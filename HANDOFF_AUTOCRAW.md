@@ -5,24 +5,29 @@
 >
 > Dibuat oleh: Z.ai Code (sesi 2026-06-27)
 > Target pembaca: autoclaw agent
-> Status v3 saat handoff: **v3.3.0 — multi-AI review consensus (8 fixes done)**
+> Status v3 saat handoff: **v3.3.1 — autoclaw hotfix (atomic_arb filter + sizer deadlock)**
 
 ---
 
-## 1. Status Saat Ini (Snapshot v3.3.0)
+## 1. Status Saat Ini (Snapshot v3.3.1)
 
 ### ✅ Yang sudah jalan
-- **Bot v3.3.0** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
+- **Bot v3.3.1** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
 - **4 strategi aktif:** `latency_arb`, `atomic_arb`, `resolution_snipe`, `momentum`
 - **WebSocket feeds:** Binance (BTC/ETH/SOL) + Polymarket CLOB (34 tokens, real-time)
-- **Dashboard v3-only** di http://3.107.53.103:8082/ (public, auto-refresh 5s, title "v3.3.0")
+- **Dashboard v3-only** di http://3.107.53.103:8082/ (public, auto-refresh 5s, title "v3.3.1")
 - **SQLite WAL** state, async paper executor, risk manager dengan per-strategy budget
-- **Daemon** dengan exponential backoff + health check
+- **Daemon v3.3.0** dengan exponential backoff + deep health check (24/7 reliable)
 - **Wallet invariant check** — bankroll == cash + invested, verified every 3s
-- **v2 STOPPED** — source code kept at `/home/ubuntu/polyclaw-cipher/` for docs
-- **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (public for review)
+- **v2 STOPPED + cleaned** — source code archived di `archive/v2-legacy/` di repo
+- **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
 
-### 🆕 Baru di v3.3.0 (vs v3.2.0) — Multi-AI Review Consensus
+### 🆕 Baru di v3.3.1 (autoclaw hotfix)
+- **atomic_arb category filter** — was missing, traded sports_spread (random outcome)
+- **Sizer deadlock fix** — dynamic buffer blocked all trades when over-deployed;
+  emergency mode allows 50% of available cash for reduced trading
+
+### 🆕 Baru di v3.3.0 (multi-AI review consensus)
 
 Based on cross-review by 3 AI (Claude, Lisa/Qwen, Grok). All conflicts resolved via
 discussion. See `SUMMARY_V3_REVIEW_DISCUSSION.md` for full review history.
@@ -593,9 +598,9 @@ curl http://localhost:8080/api/stats
 - **VPS:** 3.107.53.103 (AWS t2.small, Ubuntu)
 - **SSH:** `ssh -i ~/.ssh/t2small.pem ubuntu@3.107.53.103`
 - **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (public for review)
-- **v3 location:** `/home/ubuntu/polyclaw-cipher-v3/` (current, running v3.3.0)
+- **v3 location:** `/home/ubuntu/polyclaw-cipher-v3/` (current, running v3.3.1)
 - **v3 port:** 0.0.0.0:8082 (public access)
-- **v3 dashboard:** `http://3.107.53.103:8082/` (v3.3.0, auto-refresh 5s)
+- **v3 dashboard:** `http://3.107.53.103:8082/` (v3.3.1, auto-refresh 5s)
 - **v2 location:** `/home/ubuntu/polyclaw-cipher/` (STOPPED, source kept for docs)
 
 **Catatan:** v2 punya bug kritis (fake resolution, blocking executor, dll) yang

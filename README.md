@@ -1,4 +1,4 @@
-# PolyClaw-Cipher v3.3.0 🔍
+# PolyClaw-Cipher v3.3.1 🔍
 
 > HFT-capable Polymarket bot with AI agent — aggressive compounding for small capital ($25+)
 
@@ -30,7 +30,7 @@
 
 ## Overview
 
-PolyClaw-Cipher v3.3.0 adalah trading bot untuk [Polymarket](https://polymarket.com) yang dirancang untuk **aggressive compounding** dari modal kecil ($25+). Bot ini menggunakan WebSocket real-time untuk eksekusi cepat, event-driven architecture untuk reactivity maksimal, dan multiple strategies untuk diversifikasi edge.
+PolyClaw-Cipher v3.3.1 adalah trading bot untuk [Polymarket](https://polymarket.com) yang dirancang untuk **aggressive compounding** dari modal kecil ($25+). Bot ini menggunakan WebSocket real-time untuk eksekusi cepat, event-driven architecture untuk reactivity maksimal, dan multiple strategies untuk diversifikasi edge.
 
 **Target:** $25 → $150-200/week via compounding + high frequency + good signals.
 
@@ -488,7 +488,7 @@ PolyClaw-Chiper/
 
 ## Roadmap
 
-### ✅ v3.3.0 (current) — Multi-AI Review Consensus
+### ✅ v3.3.1 (current) — Multi-AI Review Consensus
 - **Market category split** — `sports_derivative` → `sports_total` (O/U, predictable) + `sports_spread` (random)
   - Momentum only allows `sports_total` (point spread excluded — 1 goal = flip)
   - Based on Claude's insight: point spread is statistically random, O/U goals is Poisson
@@ -591,7 +591,7 @@ Lihat `V3_REVISED_TARGET.md` untuk roadmap lengkap 5 minggu ke $150-200/week.
 
 Lihat `CHANGELOG.md` untuk semua perubahan. Highlights:
 
-- **v3.3.0** (2026-06-27): Multi-AI review consensus — category split (sports_total vs sports_spread), 3-layer config conflict fixed, record_entry/close split, untrack() explicit, dynamic cash buffer 15%, atomic_arb leg delay simulation, opportunity-rate tracking
+- **v3.3.1** (2026-06-27): Multi-AI review consensus — category split (sports_total vs sports_spread), 3-layer config conflict fixed, record_entry/close split, untrack() explicit, dynamic cash buffer 15%, atomic_arb leg delay simulation, opportunity-rate tracking
 - **v3.2.0** (2026-06-27): Market category filter (skip sports), atomic_arb pair execution fix, cash buffer 10%, min_entry_price 0.30
 - **v3.1.0** (2026-06-27): v2 stopped, dashboard v3-only, atomic_arb threshold lowered, resolution_snipe SL/TP, multiple bug fixes
 - **v3.0.0** (2026-06-27): Initial v3 release — complete rewrite from v2
