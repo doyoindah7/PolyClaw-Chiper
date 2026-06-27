@@ -33,12 +33,16 @@ strategies:
   # === STRATEGY 2: ATOMIC ARBITRAGE (YES + NO < $1) ===
   # Edge: Risk-free profit when YES ask + NO ask < $1
   # Lowered threshold 100→40 bps (Polymarket markets efficient, real arbs are 20-50 bps)
+  # v3.3.1: Added category filter (was missing — traded sports_spread)
   atomic_arb:
     enabled: true
     min_profit_bps: 40                # Min 0.4% profit after fees (lowered from 100)
     max_position_pct: 0.40            # 40% bankroll per arb (low risk)
     max_concurrent: 5
     scan_interval_sec: 1              # Event-driven, fast check
+    # v3.3.1: Category filter — skip random-outcome markets
+    skip_random_outcome: true
+    allowed_categories: ["crypto", "sports_total", "economics", "politics", "other"]
 
   # === STRATEGY 3: RESOLUTION SNIPING ===
   # v3.3.0: Relaxed price band 0.90→0.88 + time 24h→72h (measurement mode)

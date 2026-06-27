@@ -29,6 +29,10 @@ class AtomicArbStrategy(BaseStrategy):
         self.max_concurrent = c.get("max_concurrent", 5)
         self.scan_interval_sec = c.get("scan_interval_sec", 1)
         self.cooldown_sec = 5
+        # v3.3.1 fix: Add category filter (was missing — atomic_arb traded sports_spread)
+        self.skip_random_outcome = c.get("skip_random_outcome", True)
+        self.allowed_categories = c.get("allowed_categories",
+            ["crypto", "sports_total", "economics", "politics", "other"])
         self._clob = clob_feed
         self._last_signal_at: dict[str, float] = {}
 
@@ -37,6 +41,14 @@ class AtomicArbStrategy(BaseStrategy):
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         if not self._clob:
+            return None
+
+        # v3.3.1 fix: Category filter — skip random-outcome markets (sports_spread)
+        # Was missing, caused bot to trade "Spread: Belgium (-2.5)" = random outcome
+        if self.skip_random_outcome and market.is_random_outcome:
+            return None
+        cat = market.classify()
+        if self.allowed_categories and cat not in self.allowed_categories:
             return None
 
         # Skip if market is closed or resolved

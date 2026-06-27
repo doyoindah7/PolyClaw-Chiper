@@ -53,6 +53,8 @@ class CompoundingSizer:
             strategy_max_pct: Per-strategy max capital % (PRIMARY source of truth)
         """
         # v3.3.0: Dynamic cash buffer — auto-increase reserve if over-deployed
+        # v3.3.1 fix: Deadlock prevention — if cash < reserve (over-deployed),
+        # don't block entirely. Allow emergency trading with reduced size.
         effective_cash_min_pct = self.cash_min_pct
         if self.dynamic_cash_buffer and bankroll > 0:
             deployed_pct = (bankroll - cash) / bankroll
@@ -62,6 +64,13 @@ class CompoundingSizer:
         # Cash reserve (global, potentially dynamic)
         reserve = bankroll * (effective_cash_min_pct / 100.0)
         deployable = max(0.0, cash - reserve)
+
+        # v3.3.1 fix: Emergency mode — if deployable = 0 but cash > min_position_usd,
+        # allow reduced trading (50% of available cash) to prevent deadlock.
+        # Bot stays active, can generate TP/SL exits to free cash naturally.
+        if deployable < self.min_position_usd and cash > self.min_position_usd:
+            deployable = cash * 0.5  # Emergency: use 50% of available cash
+            # Note: confidence scaling will further reduce this
 
         free_slots = max(1, max_positions_for_strategy - open_positions_for_strategy)
         base_notional = deployable / free_slots
