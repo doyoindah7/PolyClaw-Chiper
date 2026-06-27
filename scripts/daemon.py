@@ -112,6 +112,97 @@ def kill_bot_gracefully(proc: subprocess.Popen, timeout: float = 10.0) -> None:
         proc.wait()
 
 
+class StagnationDetector:
+    """v3.5.0: Track state deltas to detect bot inactivity (Arena.ai recommendation).
+
+    Bot can be "alive" (HTTP 200) but "stuck" (no signals, no trades, bankroll frozen).
+    This detector tracks state changes over time and flags stagnation.
+    """
+
+    def __init__(self):
+        self.history: dict[str, list[tuple[float, float]]] = {
+            "bankroll": [],
+            "trades": [],
+            "signals": [],
+        }
+        self.last_stagnant_restart: float = 0.0
+        self.stagnation_cooldown: float = 1800.0  # 30 min between stagnation restarts
+
+    def record(self, stats: dict) -> None:
+        """Record current state snapshot."""
+        now = time.time()
+        self.history["bankroll"].append((now, stats.get("bankroll", 0)))
+        self.history["trades"].append((now, stats.get("trades", 0)))
+        self.history["signals"].append((now, stats.get("signals", 0)))
+        # Keep only last 2 hours
+        cutoff = now - 7200
+        for key in self.history:
+            self.history[key] = [(ts, v) for ts, v in self.history[key] if ts > cutoff]
+
+    def is_stagnant(self, stats: dict, threshold_min: int = 15) -> tuple[bool, str]:
+        """Check if bot has been stagnant (no state change) for threshold_min minutes.
+
+        Returns (is_stagnant, reason).
+        """
+        now = time.time()
+        threshold = threshold_min * 60
+
+        # Need at least 3 samples to compare
+        for key in self.history:
+            if len(self.history[key]) < 3:
+                return False, "insufficient data"
+
+        # Check 1: Bankroll unchanged for threshold_min
+        br_hist = self.history["bankroll"]
+        if br_hist[-1][0] - br_hist[0][0] >= threshold:
+            if abs(br_hist[-1][1] - br_hist[0][1]) < 0.01:
+                return True, f"Bankroll unchanged for {threshold_min}m (stuck at ${br_hist[-1][1]:.2f})"
+
+        # Check 2: No new trades for threshold_min (when bankroll > $30)
+        bankroll = stats.get("bankroll", 0)
+        tr_hist = self.history["trades"]
+        if bankroll > 30 and tr_hist[-1][0] - tr_hist[0][0] >= threshold:
+            if tr_hist[-1][1] == tr_hist[0][1]:
+                return True, f"No new trades for {threshold_min}m (trades stuck at {int(tr_hist[-1][1])})"
+
+        # Check 3: No new signals for 10 min
+        sig_hist = self.history["signals"]
+        if sig_hist[-1][0] - sig_hist[0][0] >= 600:  # 10 min
+            if sig_hist[-1][1] == sig_hist[0][1]:
+                return True, "No new signals for 10m (strategies may be dead)"
+
+        # Check 4: All strategies disabled
+        disabled = stats.get("risk", {}).get("disabled_strategies", [])
+        if len(disabled) >= 3:
+            return True, f"All strategies disabled: {disabled}"
+
+        # Check 5: Cash stuck (high bankroll, almost no cash, high deployment)
+        cash = stats.get("cash", 0)
+        deployed = stats.get("deployed", 0)
+        if bankroll > 30 and cash < 1.0 and deployed > bankroll * 0.9:
+            return True, f"Cash stuck: ${cash:.2f} cash, ${deployed:.2f} deployed"
+
+        # Check 6: 0 markets tracked (scanner dead)
+        markets = stats.get("markets", 0)
+        if markets == 0:
+            return True, "0 markets tracked (scanner dead?)"
+
+        return False, "OK"
+
+    def should_restart(self, stats: dict, threshold_min: int = 15) -> tuple[bool, str]:
+        """Check stagnation + apply cooldown (don't restart too frequently)."""
+        stagnant, reason = self.is_stagnant(stats, threshold_min)
+        if not stagnant:
+            return False, "OK"
+
+        now = time.time()
+        if now - self.last_stagnant_restart < self.stagnation_cooldown:
+            return False, f"Stagnation detected but cooldown active ({int((self.stagnation_cooldown - (now - self.last_stagnant_restart))//60)}m left)"
+
+        self.last_stagnant_restart = now
+        return True, reason
+
+
 def run_bot() -> subprocess.Popen:
     """Start the bot process."""
     env = dict(os.environ)
@@ -178,6 +269,10 @@ def main() -> None:
     # v3.3.0: Periodic deep health check interval (every 60s)
     deep_check_interval = 60
     last_deep_check = 0.0
+    # v3.5.0: Stagnation detector (Arena.ai recommendation)
+    stagnation_detector = StagnationDetector()
+    stagnation_check_interval = 120  # Check every 2 min
+    last_stagnation_check = 0.0
 
     while not _shutdown_requested:
         proc = run_bot()
@@ -185,6 +280,7 @@ def main() -> None:
         uptime_threshold = 3600  # 1 hour
         consecutive_restart_idx = 0
         last_deep_check = time.time()
+        last_stagnation_check = time.time()
 
         while proc.poll() is None and not _shutdown_requested:
             time.sleep(10)
@@ -215,6 +311,26 @@ def main() -> None:
                     logger.error("Disk space CRITICAL: %.1f%% full — bot may fail soon", disk_pct * 100)
                 elif disk_pct > 0.85:
                     logger.warning("Disk space high: %.1f%% full", disk_pct * 100)
+
+            # v3.5.0: Stagnation detection (every 2 min) — Arena.ai recommendation
+            if now - last_stagnation_check >= stagnation_check_interval:
+                last_stagnation_check = now
+                try:
+                    import urllib.request
+                    url = f"http://{health_host}:{port}/api/stats"
+                    req = urllib.request.Request(url)
+                    with urllib.request.urlopen(req, timeout=5.0) as resp:
+                        stats = json.loads(resp.read().decode())
+                    stagnation_detector.record(stats)
+                    should_restart, reason = stagnation_detector.should_restart(stats, threshold_min=15)
+                    if should_restart:
+                        logger.error("STAGNATION DETECTED: %s — restarting bot to recover", reason)
+                        kill_bot_gracefully(proc)
+                        break
+                    else:
+                        logger.info("Stagnation check: %s", reason)
+                except Exception as e:
+                    logger.debug("Stagnation check failed: %s", e)
 
         if _shutdown_requested:
             logger.info("Graceful shutdown requested for daemon — exiting bot")
