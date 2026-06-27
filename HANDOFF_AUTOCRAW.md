@@ -623,9 +623,9 @@ curl http://localhost:8080/api/stats
 - **VPS:** 3.107.53.103 (AWS t2.small, Ubuntu)
 - **SSH:** `ssh -i ~/.ssh/t2small.pem ubuntu@3.107.53.103`
 - **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (public for review)
-- **v3 location:** `/home/ubuntu/polyclaw-cipher-v3/` (current, running v3.3.1)
+- **v3 location:** `/home/ubuntu/polyclaw-cipher-v3/` (current, running v3.4.3)
 - **v3 port:** 0.0.0.0:8082 (public access)
-- **v3 dashboard:** `http://3.107.53.103:8082/` (v3.3.1, auto-refresh 5s)
+- **v3 dashboard:** `http://3.107.53.103:8082/` (v3.4.3, auto-refresh 5s)
 - **v2 location:** `/home/ubuntu/polyclaw-cipher/` (STOPPED, source kept for docs)
 
 **Catatan:** v2 punya bug kritis (fake resolution, blocking executor, dll) yang
