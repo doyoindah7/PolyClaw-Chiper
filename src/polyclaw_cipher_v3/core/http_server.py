@@ -51,11 +51,15 @@ class HTTPServer:
         port: int = 8082,
         get_stats=None,
         config: dict[str, Any] | None = None,
+        get_db_stats=None,  # v3.5.7: daemon lightweight watchdog
+        wal_checkpoint=None,  # v3.5.7: daemon lightweight watchdog
     ):
         self.host = host
         self.port = port
         self.get_stats = get_stats
         self.config = config or {}
+        self.get_db_stats = get_db_stats  # async callable: (hours: int) -> dict
+        self.wal_checkpoint = wal_checkpoint  # async callable: () -> None
         self._server = None
         self._task = None
         self._start_time: float = 0.0
@@ -125,6 +129,44 @@ class HTTPServer:
                 except Exception as e:
                     logger.error("Failed to update Prometheus metrics: %s", e)
             return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+        # v3.5.7: Admin endpoints for daemon lightweight watchdog
+        # Localhost-only via middleware below. Used for:
+        #   - /api/admin/db_stats: pre-computed signal/trade aggregates for daemon monitoring
+        #   - /api/admin/wal_checkpoint: trigger manual WAL checkpoint (safer than docker exec sqlite3)
+
+        @self.app.get("/api/admin/db_stats")
+        async def admin_db_stats(request: Request, hours: int = 1):
+            """Pre-computed DB aggregates for daemon watchdog. Localhost only."""
+            # Localhost check (defense in depth)
+            client_host = request.client.host if request.client else ""
+            if client_host not in ("127.0.0.1", "::1", "localhost"):
+                return JSONResponse({"error": "Admin endpoints localhost only"}, status_code=403)
+            if not self.get_db_stats:
+                return JSONResponse({"error": "db_stats callback not configured"}, status_code=503)
+            try:
+                hours = max(1, min(168, hours))  # clamp 1h-7d
+                stats = await self.get_db_stats(hours)
+                return JSONResponse(stats)
+            except Exception as e:
+                logger.error("admin_db_stats error: %s", e)
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        @self.app.post("/api/admin/wal_checkpoint")
+        async def admin_wal_checkpoint(request: Request):
+            """Trigger manual WAL checkpoint. Localhost only."""
+            client_host = request.client.host if request.client else ""
+            if client_host not in ("127.0.0.1", "::1", "localhost"):
+                return JSONResponse({"error": "Admin endpoints localhost only"}, status_code=403)
+            if not self.wal_checkpoint:
+                return JSONResponse({"error": "wal_checkpoint callback not configured"}, status_code=503)
+            try:
+                await self.wal_checkpoint()
+                logger.info("WAL checkpoint triggered via admin API")
+                return JSONResponse({"status": "ok", "checkpoint": "completed"})
+            except Exception as e:
+                logger.error("admin_wal_checkpoint error: %s", e)
+                return JSONResponse({"error": str(e)}, status_code=500)
 
     async def start(self) -> None:
         import uvicorn

@@ -1,2 +1,2 @@
-"""PolyClaw-Cipher v3.5.9 — HFT-capable Polymarket bot (Super Z audit fixes)."""
-__version__ = "3.5.5"
+"""PolyClaw-Cipher v3.5.10 — HFT-capable Polymarket bot (lightweight watchdog)."""
+__version__ = "3.5.10"

@@ -108,6 +108,8 @@ class PolyClawCipherV3:
             port=web_conf.get("port", 8082),
             get_stats=self._get_stats,
             config=self.config,
+            get_db_stats=self._get_db_stats,  # v3.5.7: daemon lightweight watchdog
+            wal_checkpoint=self._trigger_wal_checkpoint,  # v3.5.7
         )
 
         # State
@@ -760,6 +762,46 @@ class PolyClawCipherV3:
                 break
             except Exception as e:
                 logger.error("WAL checkpoint error: %s", e)
+
+    async def _trigger_wal_checkpoint(self) -> None:
+        """v3.5.7: Manual WAL checkpoint trigger via admin API.
+
+        Called by daemon when WAL file > 5MB. Safer than `docker exec sqlite3`
+        because bot handles async concurrency properly (no race with running writes).
+        """
+        await self.db.checkpoint()
+
+    async def _get_db_stats(self, hours: int = 1) -> dict:
+        """v3.5.7: Pre-computed DB aggregates for daemon watchdog.
+
+        Returns signal/trade counts and PnL sum for the last `hours` window.
+        Used by daemon's SignalStarvationChecker via /api/admin/db_stats endpoint.
+        """
+        cutoff = time.time() - hours * 3600
+        # Signal counts (executed + rejected)
+        signals_total = await self.signal_repo.count_since(cutoff)
+        signals_executed = await self.signal_repo.count_since(cutoff, executed=True)
+        signals_rejected = signals_total - signals_executed
+        # Trade counts + PnL
+        trades_closed = await self.trade_repo.count_since(cutoff)
+        pnl_period = await self.trade_repo.sum_pnl_since(cutoff)
+        # Per-strategy signal breakdown
+        per_strategy = await self.signal_repo.count_by_strategy_since(cutoff)
+        return {
+            "window_hours": hours,
+            "cutoff_timestamp": cutoff,
+            "signals": {
+                "total": signals_total,
+                "executed": signals_executed,
+                "rejected": signals_rejected,
+                "rejection_rate": (signals_rejected / signals_total) if signals_total > 0 else 0.0,
+                "per_strategy": per_strategy,
+            },
+            "trades": {
+                "closed": trades_closed,
+                "pnl_total": round(pnl_period, 4) if pnl_period else 0.0,
+            },
+        }
 
     def stop(self) -> None:
         self._running = False

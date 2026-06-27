@@ -98,6 +98,18 @@ class TradeRepository:
         )
         return int(row["cnt"]) if row else 0
 
+    async def count_since(self, since_ts: float) -> int:
+        """v3.5.7: Count trades closed since timestamp. Alias for count_trades_since."""
+        return await self.count_trades_since(since_ts)
+
+    async def sum_pnl_since(self, since_ts: float) -> float:
+        """v3.5.7: Sum PnL for trades closed since timestamp."""
+        row = await self.db.fetchone(
+            "SELECT COALESCE(SUM(pnl_dollar), 0) AS total FROM trades WHERE closed_at >= ?",
+            (since_ts,),
+        )
+        return float(row["total"]) if row else 0.0
+
     async def stats(self) -> dict[str, Any]:
         row = await self.db.fetchone("""
             SELECT
@@ -190,6 +202,34 @@ class SignalRepository:
             "SELECT * FROM signals ORDER BY timestamp DESC LIMIT ?", (limit,),
         )
         return [dict(r) for r in rows]
+
+    async def count_since(self, cutoff_ts: float, executed: bool | None = None) -> int:
+        """v3.5.7: Count signals since cutoff_ts. If `executed` is None, count all.
+
+        Used by daemon's SignalStarvationChecker via /api/admin/db_stats.
+        """
+        if executed is None:
+            row = await self.db.fetchone(
+                "SELECT COUNT(*) AS cnt FROM signals WHERE timestamp >= ?", (cutoff_ts,),
+            )
+        else:
+            row = await self.db.fetchone(
+                "SELECT COUNT(*) AS cnt FROM signals WHERE timestamp >= ? AND executed = ?",
+                (cutoff_ts, int(executed)),
+            )
+        return int(row["cnt"]) if row else 0
+
+    async def count_by_strategy_since(self, cutoff_ts: float) -> dict[str, int]:
+        """v3.5.7: Count signals per strategy since cutoff_ts.
+
+        Returns dict like {"momentum": 12, "atomic_arb": 5, ...}.
+        Used by daemon to detect per-strategy signal starvation.
+        """
+        rows = await self.db.fetchall(
+            "SELECT strategy, COUNT(*) AS cnt FROM signals WHERE timestamp >= ? GROUP BY strategy",
+            (cutoff_ts,),
+        )
+        return {r["strategy"]: int(r["cnt"]) for r in rows} if rows else {}
 
 
 def _row_to_position(row) -> Position:

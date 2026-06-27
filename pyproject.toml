@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polyclaw-cipher-v3"
-version = "3.5.5"
+version = "3.5.10"
 description = "HFT-capable Polymarket bot with AI agent — aggressive compounding for small capital"
 requires-python = ">=3.11"
 dependencies = [

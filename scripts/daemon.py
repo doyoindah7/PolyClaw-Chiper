@@ -245,12 +245,206 @@ def run_bot() -> subprocess.Popen:
 _shutdown_requested = False
 
 
+# v3.5.7: Lightweight watchdog state (in-memory, persists across bot restarts but not daemon restarts)
+_wal_alert_cooldown: float = 0.0  # Don't spam WAL alerts
+_disk_cleanup_cooldown: float = 0.0  # Don't spam disk cleanup
+
+
 def signal_handler(signum, frame):
     """v3.3.0: Handle SIGTERM/SIGINT for graceful shutdown."""
     global _shutdown_requested
     sig_name = signal.Signals(signum).name
     logger.info("Received %s — initiating graceful shutdown", sig_name)
     _shutdown_requested = True
+
+
+# v3.5.7: Lightweight watchdog checks (no modular restructure, just functions)
+
+
+def check_signal_starvation(host: str, port: int) -> None:
+    """v3.5.7: Check signal starvation + execution failure via /api/admin/db_stats.
+
+    Logs:
+    - INFO per strategy if 0 signals in last 1h
+    - WARN if momentum < 2 signals/hour (momentum should be most active)
+    - ERROR if total_signals > 10 but trades_closed = 0 (execution pipeline issue)
+    """
+    import urllib.request
+    import urllib.error
+    try:
+        url = f"http://{host}:{port}/api/admin/db_stats?hours=1"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+
+        signals = data.get("signals", {})
+        trades = data.get("trades", {})
+        total_signals = signals.get("total", 0)
+        executed_signals = signals.get("executed", 0)
+        rejected_signals = signals.get("rejected", 0)
+        rejection_rate = signals.get("rejection_rate", 0.0)
+        per_strategy = signals.get("per_strategy", {})
+        trades_closed = trades.get("closed", 0)
+        pnl_period = trades.get("pnl_total", 0.0)
+
+        # Check 1: Per-strategy starvation (INFO level — most "no signal" cases are normal)
+        for strat in ["momentum", "atomic_arb", "latency_arb", "resolution_snipe"]:
+            n = per_strategy.get(strat, 0)
+            if n == 0:
+                logger.info("SignalCheck: %s emitted 0 signals in last 1h", strat)
+            elif strat == "momentum" and n < 2:
+                logger.warning("SignalCheck: momentum only %d signals in 1h (expected 5+)", n)
+
+        # Check 2: High rejection rate (ERROR — risk gate too tight or bug)
+        if total_signals > 5 and rejection_rate > 0.7:
+            logger.error(
+                "SignalCheck: HIGH rejection rate %d/%d (%.0f%%) — risk gate too tight?",
+                rejected_signals, total_signals, rejection_rate * 100,
+            )
+
+        # Check 3: Execution pipeline broken (ERROR — signals fired but no trades)
+        if total_signals > 10 and trades_closed == 0:
+            logger.error(
+                "SignalCheck: %d signals fired but 0 trades closed in 1h — execution pipeline issue?",
+                total_signals,
+            )
+
+        # Check 4: Positive summary (DEBUG level, for visibility)
+        logger.debug(
+            "SignalCheck: signals=%d (exec=%d, rej=%d), trades=%d, pnl=$%.2f in 1h",
+            total_signals, executed_signals, rejected_signals, trades_closed, pnl_period,
+        )
+
+    except urllib.error.HTTPError as e:
+        logger.warning("SignalCheck: db_stats endpoint returned HTTP %d", e.code)
+    except Exception as e:
+        logger.debug("SignalCheck failed: %s", e)
+
+
+def check_cash_deployment(host: str, port: int) -> None:
+    """v3.5.7: Monitor cash deployment ratio.
+
+    Logs:
+    - WARN if cash < 5% of bankroll (over-deployed)
+    - ERROR if cash < 1% of bankroll (deadlock imminent)
+    Note: Bot sizer v3.5.5 already hard-blocks new entries when cash < $1.
+    This is for visibility — no auto-action.
+    """
+    import urllib.request
+    try:
+        url = f"http://{host}:{port}/api/stats"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            stats = json.loads(resp.read().decode())
+
+        bankroll = stats.get("bankroll", 0.0)
+        cash = stats.get("cash", 0.0)
+        if bankroll <= 0:
+            return
+
+        cash_pct = cash / bankroll
+        if cash_pct < 0.01:
+            logger.error(
+                "CashCheck: CRITICAL — cash=$%.2f (%.1f%% of bankroll $%.2f) — deadlock imminent",
+                cash, cash_pct * 100, bankroll,
+            )
+        elif cash_pct < 0.05:
+            logger.warning(
+                "CashCheck: over-deployed — cash=$%.2f (%.1f%% of bankroll $%.2f)",
+                cash, cash_pct * 100, bankroll,
+            )
+        else:
+            logger.debug("CashCheck: OK — cash=$%.2f (%.1f%% of bankroll $%.2f)",
+                         cash, cash_pct * 100, bankroll)
+    except Exception as e:
+        logger.debug("CashCheck failed: %s", e)
+
+
+def check_resources(host: str, port: int) -> None:
+    """v3.5.7: Resource checks — WAL file size, container memory, docker log size.
+
+    Auto-actions:
+    - WAL > 5MB → trigger /api/admin/wal_checkpoint (with 10-min cooldown)
+    - Disk > 90% → docker system prune -f (with 30-min cooldown)
+    """
+    import subprocess
+    global _wal_alert_cooldown, _disk_cleanup_cooldown
+    now = time.time()
+
+    # Check 1: WAL file size (via filesystem)
+    try:
+        wal_path = "/app/data/cipher_v3.db-wal"
+        if os.path.exists(wal_path):
+            wal_size = os.path.getsize(wal_path)
+            wal_mb = wal_size / (1024 * 1024)
+            if wal_mb > 5.0:
+                if now - _wal_alert_cooldown > 600:  # 10 min cooldown
+                    logger.warning("ResourceCheck: WAL file %.1fMB — triggering checkpoint", wal_mb)
+                    # Trigger checkpoint via admin API
+                    try:
+                        import urllib.request
+                        url = f"http://{host}:{port}/api/admin/wal_checkpoint"
+                        req = urllib.request.Request(url, method="POST")
+                        with urllib.request.urlopen(req, timeout=10.0) as resp:
+                            result = json.loads(resp.read().decode())
+                            logger.info("ResourceCheck: WAL checkpoint triggered: %s", result.get("status"))
+                        _wal_alert_cooldown = now
+                    except Exception as e:
+                        logger.error("ResourceCheck: WAL checkpoint failed: %s", e)
+                        _wal_alert_cooldown = now  # Still cooldown to avoid spam
+            else:
+                logger.debug("ResourceCheck: WAL file %.1fMB (OK)", wal_mb)
+    except Exception as e:
+        logger.debug("ResourceCheck: WAL size check failed: %s", e)
+
+    # Check 2: Container memory (via docker stats — non-blocking)
+    try:
+        result = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", "polyclaw-cipher-v3"],
+            capture_output=True, text=True, timeout=5.0,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Output format: "72.21MiB / 1GiB"
+            mem_str = result.stdout.strip().split(" / ")[0]
+            # Parse "72.21MiB" or "1.5GiB"
+            if "MiB" in mem_str:
+                mem_mb = float(mem_str.replace("MiB", "").strip())
+            elif "GiB" in mem_str:
+                mem_mb = float(mem_str.replace("GiB", "").strip()) * 1024
+            else:
+                mem_mb = 0
+
+            if mem_mb > 800:
+                logger.error("ResourceCheck: Container memory %.0fMB / 1024MB — OOM imminent", mem_mb)
+            elif mem_mb > 600:
+                logger.warning("ResourceCheck: Container memory %.0fMB / 1024MB — high", mem_mb)
+            else:
+                logger.debug("ResourceCheck: Container memory %.0fMB (OK)", mem_mb)
+    except Exception as e:
+        logger.debug("ResourceCheck: memory check failed: %s", e)
+
+    # Check 3: Disk space (upgrade existing check with auto-cleanup)
+    disk_ok, disk_pct = check_disk_space()
+    if not disk_ok:
+        logger.error("ResourceCheck: Disk CRITICAL %.1f%% — bot may fail soon", disk_pct * 100)
+        # Auto-cleanup: docker system prune + builder prune (with 30-min cooldown)
+        if now - _disk_cleanup_cooldown > 1800:
+            logger.warning("ResourceCheck: Auto-cleanup triggered — running docker system prune")
+            try:
+                subprocess.run(["docker", "system", "prune", "-f"], capture_output=True, timeout=60.0)
+                subprocess.run(["docker", "builder", "prune", "-f"], capture_output=True, timeout=60.0)
+                logger.info("ResourceCheck: Auto-cleanup completed")
+                _disk_cleanup_cooldown = now
+            except Exception as e:
+                logger.error("ResourceCheck: Auto-cleanup failed: %s", e)
+                _disk_cleanup_cooldown = now
+    elif disk_pct > 0.85:
+        logger.warning("ResourceCheck: Disk high %.1f%% full", disk_pct * 100)
+    else:
+        logger.debug("ResourceCheck: Disk %.1f%% (OK)", disk_pct * 100)
+
+
+
 
 
 def main() -> None:
@@ -271,9 +465,11 @@ def main() -> None:
     Path("data").mkdir(exist_ok=True)
     Path("data/heartbeat.json").write_text('{"heartbeat": ' + str(time.time()) + '}')
 
-    logger.info("Daemon v3.3.0 started — bot port=%d (deep health check via %s)", port, health_host)
+    logger.info("Daemon v3.5.7 started — bot port=%d (deep health check via %s)", port, health_host)
     logger.info("Crash loop threshold: %d/hour → switch to %ds intervals (never give up)",
                 crash_loop_threshold, long_interval)
+    logger.info("Watchdog checks every %ds: signal_starvation, cash_deployment, resources",
+                watchdog_check_interval)
 
     # v3.3.0: Periodic deep health check interval (every 60s)
     deep_check_interval = 60
@@ -282,6 +478,9 @@ def main() -> None:
     stagnation_detector = StagnationDetector()
     stagnation_check_interval = 120  # Check every 2 min
     last_stagnation_check = 0.0
+    # v3.5.7: Lightweight watchdog checks (every 60s)
+    watchdog_check_interval = 60
+    last_watchdog_check = 0.0
 
     while not _shutdown_requested:
         proc = run_bot()
@@ -290,6 +489,7 @@ def main() -> None:
         consecutive_restart_idx = 0
         last_deep_check = time.time()
         last_stagnation_check = time.time()
+        last_watchdog_check = time.time()
 
         while proc.poll() is None and not _shutdown_requested:
             time.sleep(10)
@@ -340,6 +540,16 @@ def main() -> None:
                         logger.info("Stagnation check: %s", reason)
                 except Exception as e:
                     logger.debug("Stagnation check failed: %s", e)
+
+            # v3.5.7: Lightweight watchdog checks (every 60s)
+            # - Signal starvation + execution failure (via /api/admin/db_stats)
+            # - Cash deployment ratio (via /api/stats)
+            # - Resource alerts: WAL size, container memory, disk + auto-actions
+            if now - last_watchdog_check >= watchdog_check_interval:
+                last_watchdog_check = now
+                check_signal_starvation(health_host, port)
+                check_cash_deployment(health_host, port)
+                check_resources(health_host, port)
 
         if _shutdown_requested:
             logger.info("Graceful shutdown requested for daemon — exiting bot")
