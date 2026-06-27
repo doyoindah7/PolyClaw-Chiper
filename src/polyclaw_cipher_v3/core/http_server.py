@@ -425,35 +425,22 @@ body {
     </div>
   </div>
 
-  <!-- Recent Trades -->
-  <div class="card" style="margin-bottom:14px">
-    <div class="card-title">
-      <span>📝 Recent Trades (closed)</span>
-      <span class="badge" id="trade-count">0</span>
-    </div>
-    <div class="scroll-list" id="trades-container">
-      <div class="empty">No closed trades yet</div>
-    </div>
-  </div>
-
-  <!-- Trade History (expandable + pagination) v3.5.11 -->
+  <!-- Trade History (always visible, paginated) -->
   <div class="card" style="margin-bottom:14px" id="history-card">
-    <div class="card-title" style="cursor:pointer" onclick="toggleHistoryPanel()">
-      <span>📚 Trade History (full)</span>
+    <div class="card-title">
+      <span>📚 Trade History</span>
       <span class="badge" id="history-total">0</span>
-      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px">[click to expand]</span>
+      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px" id="history-page-info">Page 1 of 1</span>
     </div>
-    <div id="history-panel" style="display:none">
-      <div id="history-container">
-        <div class="empty">Loading...</div>
-      </div>
-      <div id="history-pagination" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-top:1px solid var(--border);font-size:0.75rem">
-        <span id="history-page-info">Page 1 of 1</span>
-        <div>
-          <button id="history-prev" onclick="historyPrevPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">← Prev</button>
-          <span style="margin:0 8px;color:var(--muted)">|</span>
-          <button id="history-next" onclick="historyNextPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">Next →</button>
-        </div>
+    <div class="scroll-list" id="history-container">
+      <div class="empty">Loading trades...</div>
+    </div>
+    <div id="history-pagination" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-top:1px solid var(--border);font-size:0.75rem">
+      <span style="color:var(--muted);font-size:0.65rem">Auto-refresh page 1 every 5s</span>
+      <div>
+        <button id="history-prev" onclick="historyPrevPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">← Prev</button>
+        <span style="margin:0 8px;color:var(--muted)">|</span>
+        <button id="history-next" onclick="historyNextPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">Next →</button>
       </div>
     </div>
   </div>
@@ -693,33 +680,9 @@ function renderSignals(d) {
 }
 
 function renderTrades(d) {
-  const cont = document.getElementById('trades-container');
-  const trades = d.recent_trades || [];
-  document.getElementById('trade-count').textContent = trades.length;
-  if (trades.length === 0) {
-    cont.innerHTML = '<div class="empty">No closed trades yet — positions will close on TP/SL/resolution</div>';
-    return;
-  }
-  let html = '<table class="tbl"><thead><tr>' +
-    '<th>Market</th><th>Strat</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL $</th><th>PnL %</th><th>Reason</th><th>When</th>' +
-    '</tr></thead><tbody>';
-  for (const t of trades.slice().reverse()) {
-    const pnlCls = t.pnl_dollar >= 0 ? 'pnl-pos' : 'pnl-neg';
-    const strat = t.strategy || '';
-    html += '<tr>' +
-      '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + (t.market_question||'').replace(/"/g,'&quot;') + '">' + (t.market_question||'').substring(0,35) + '</td>' +
-      '<td><span class="tag ' + strat + '">' + strat + '</span></td>' +
-      '<td class="side-' + (t.side||'') + '">' + (t.side||'') + '</td>' +
-      '<td>$' + fmt(t.entry_price, 4) + '</td>' +
-      '<td>$' + fmt(t.exit_price, 4) + '</td>' +
-      '<td class="' + pnlCls + '">' + (t.pnl_dollar>=0?'+':'') + '$' + fmt(t.pnl_dollar, 2) + '</td>' +
-      '<td class="' + pnlCls + '">' + (t.pnl_percent>=0?'+':'') + fmt(t.pnl_percent, 1) + '%</td>' +
-      '<td style="color:var(--muted);font-size:0.62rem;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + (t.reason||'').replace(/"/g,'&quot;') + '">' + (t.reason||'') + '</td>' +
-      '<td style="color:var(--muted)">' + timeAgo(t.closed_at) + '</td>' +
-      '</tr>';
-  }
-  html += '</tbody></table>';
-  cont.innerHTML = html;
+  // Removed in v3.5.11: Recent Trades section replaced by Trade History (always visible).
+  // Trade History auto-loads via loadHistoryPage() and auto-refreshes page 1 every 5s.
+  // This function kept as no-op for backward compat (in case called elsewhere).
 }
 
 function renderRisk(d) {
@@ -842,26 +805,17 @@ function togglePanel(id) {
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
-// v3.5.11: Trade History with pagination
+// Trade History with pagination (always visible, auto-load + auto-refresh page 1)
 let historyPage = 1;
 let historyTotalPages = 1;
-let historyLoaded = false;
+let historyAutoRefresh = true;
 
-async function toggleHistoryPanel() {
-  const panel = document.getElementById('history-panel');
-  const willShow = panel.style.display === 'none';
-  panel.style.display = willShow ? 'block' : 'none';
-  if (willShow && !historyLoaded) {
-    await loadHistoryPage(1);
-    historyLoaded = true;
-  }
-}
-
-async function loadHistoryPage(page) {
+async function loadHistoryPage(page, silent) {
   const container = document.getElementById('history-container');
-  container.innerHTML = '<div class="empty">Loading page ' + page + '...</div>';
+  if (!silent) container.innerHTML = '<div class="empty">Loading page ' + page + '...</div>';
   try {
     const resp = await fetch('/api/trades?page=' + page + '&limit=20');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     historyPage = data.page || 1;
     historyTotalPages = data.total_pages || 1;
@@ -903,7 +857,7 @@ async function loadHistoryPage(page) {
     }
     container.innerHTML = html;
   } catch (e) {
-    container.innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+    container.innerHTML = '<div class="empty">Error loading trades: ' + e.message + '</div>';
   }
 }
 
@@ -995,12 +949,16 @@ async function refresh() {
       renderKPIs(d);
       renderPositions(d);
       renderStrategies(d);
-      renderTrades(d);
       renderRisk(d);
       renderSystem(d);
       refreshSuccessCount++;
       document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
       updateConnectionStatus(true);
+      // Auto-refresh Trade History page 1 (silent — no loading spinner)
+      // Only refresh if user is on page 1 (don't disrupt browsing older pages)
+      if (historyPage === 1) {
+        loadHistoryPage(1, true);
+      }
     } else {
       refreshFailCount++;
       updateConnectionStatus(false);
@@ -1011,7 +969,9 @@ async function refresh() {
   }
 }
 
+// Initial load: fetch stats + trade history page 1
 refresh();
+loadHistoryPage(1);
 setInterval(refresh, REFRESH_MS);
 setInterval(() => {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString();
