@@ -1,0 +1,6 @@
+# Paper trading overrides
+bot:
+  mode: paper
+
+monitoring:
+  log_level: DEBUG

@@ -1,0 +1,108 @@
+# PolyClaw-Cipher v2.0 - AGGRESSIVE GROWTH CONFIG
+# Target: 5 → 50-200/week via compounding
+# Optimized for t2.small (2GB RAM) VPS
+
+bot:
+  mode: paper
+  loop_interval_sec: 2           # Loop setiap 2 detik (cepat tapi tidak spam)
+  scan_interval_sec: 15          # Scan market setiap 15 detik (balance API vs freshness)
+  max_open_positions: 6          # Max 6 posisi untuk 5 (avg  per posisi)
+
+market:
+  min_volume_24h_usd: 500        # Minimum volume
+  min_liquidity: 200             # Minimum liquidity
+  api_page_size: 500
+  max_pages: 3
+  volatility_threshold: 0.02     # 2% minimum volatility untuk masuk watchlist
+
+# === SCALPER STRATEGY - Crypto Up/Down ===
+strategies:
+  scalper:
+    enabled: true
+    # Entry window: 12 jam sebelum close (sweet spot untuk daily crypto)
+    entry_window_sec: 43200      # 12 jam (semakin dekat close = semakin akurat)
+    cancel_before_close_sec: 60  # Cancel 1 menit sebelum close
+    # Price move threshold: 0.05% (lebih realistis dari 0.001%)
+    min_price_move_pct: 0.05
+    # Volume confirmation: butuh volume spike 1.2x average
+    volume_spike_threshold: 1.2
+    min_confidence: 0.42         # Aggressive tapi tidak random
+    # Bid range: wide untuk mendapatkan fill yang baik
+    bid_low: 0.02
+    bid_high: 0.98
+    skip_if_odds_above: 0.97
+    max_positions: 3             # Max 3 posisi scalper (50% kapital)
+    max_per_market: 1            # ONE direction per market
+    cooldown_sec: 30             # 30 detik cooldown antar sinyal
+    # TP/SL: Quick scalping
+    take_profit_pct: 15.0        # 15% TP (realistis untuk Polymarket)
+    stop_loss_pct: 8.0           # 8% SL (tight risk management)
+
+  # === UNIVERSAL STRATEGY - All Volatile Markets ===
+  universal:
+    enabled: true
+    min_volume_24h: 1000
+    min_liquidity: 300
+    # Multi-timeframe: 5 menit dan 15 menit
+    lookback_sec: 300            # 5 menit untuk deteksi awal
+    secondary_lookback_sec: 900  # 15 menit untuk konfirmasi trend
+    min_price_change_pct: 1.5    # 1.5% dalam 5 menit = volatile
+    min_secondary_change_pct: 0.8 # 0.8% dalam 15 menit = sustained
+    # TP/SL
+    take_profit_pct: 12.0
+    stop_loss_pct: 6.0
+    max_positions: 3             # Max 3 posisi universal (50% kapital)
+    cooldown_sec: 60             # 1 menit cooldown
+    min_entry_price: 0.10        # Skip penny markets (terlalu risky)
+    max_entry_price: 0.90
+    max_notional_pct: 0.35       # Max 35% bankroll per trade (aggressive)
+    min_confidence: 0.40
+    # Volatility filter
+    max_volatility: 0.08         # Skip market yang terlalu choppy (>8%)
+    volatility_penalty_soft: 0.9 # Penalty ringan untuk market volatile
+
+  arbitrage:
+    enabled: false               # Disable untuk paper trading fokus
+
+  momentum:
+    enabled: false               # Disable, universal sudah cover
+
+# === RISK MANAGEMENT - Aggressive tapi Protected ===
+risk:
+  initial_bankroll_usd: 25.00
+  # Drawdown protection
+  max_daily_drawdown_pct: 40.0   # 40% max daily DD (aggressive)
+  max_consecutive_losses: 5      # Stop setelah 5 loss berturut (protect capital)
+  max_trades_per_hour: 30        # Max 30 trade/jam (prevent overtrading)
+  # Position sizing
+  max_positions: 6               # Total max posisi
+  min_position_usd: 2.50         # Minimum .50 per posisi
+  max_position_pct: 0.40         # Max 40% bankroll per posisi
+  # Compounding
+  cash_min_pct: 5                # Keep 5% cash reserve (safety buffer)
+  compound_reinvest_pct: 100     # 100% reinvest
+
+# === EXECUTION - Paper Trading ===
+execution:
+  paper:
+    slippage_bps: 25             # 0.25% slippage (realistis)
+    fill_probability_base: 0.85  # Base 85% fill rate
+    fill_probability_at_bid_low: 0.95   # Harga rendah = lebih mudah fill
+    fill_probability_at_bid_high: 0.65  # Harga tinggi = lebih sulit fill
+    queue_position_factor: 0.6
+    simulated_latency_sec: 0.2   # 200ms latency (realistis untuk VPS)
+
+# === MONITORING ===
+monitoring:
+  log_level: INFO
+  web:
+    enabled: true
+    host: 0.0.0.0
+    port: 8080
+  heartbeat_sec: 5
+  # Telegram alerts (optional - isi di .env)
+  telegram:
+    enabled: false               # Set true dan isi token di .env
+    alert_on_trade: true
+    alert_on_pnl_threshold: 5.0  # Alert setiap  PnL
+    alert_interval_min: 30       # Max 1 alert per 30 menit
