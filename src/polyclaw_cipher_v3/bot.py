@@ -642,7 +642,14 @@ class PolyClawCipherV3:
                         s["win_rate"] = db["win_rate"]
                         s["pnl"] = db["pnl"]
 
-                # WALLET INVARIANT CHECK (BUG-1 fix):
+                                # v3.5.2: Add latency_arb debug stats (MASALAH-6 fix)
+                for strat in self.strategies:
+                    if hasattr(strat, 'get_debug_stats') and strat.name == 'latency_arb':
+                        lat_stats = strat.get_debug_stats()
+                        stats['latency_arb_debug'] = lat_stats
+                        break
+
+# WALLET INVARIANT CHECK (BUG-1 fix):
                 # bankroll MUST == cash + total_invested. If not, recalculate from DB truth.
                 invested = await self.position_repo.total_invested()
                 expected_bankroll = round(self.wallet.cash + invested, 4)

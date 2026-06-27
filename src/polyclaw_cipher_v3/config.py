@@ -27,7 +27,7 @@ class MarketSettings(BaseModel):
 
 class LatencyArbConfig(BaseModel):
     enabled: bool = True
-    min_edge_pct: float = Field(default=2.0, ge=0.0)
+    min_edge_pct: float = Field(default=0.5, ge=0.0)  # v3.5.2: Lowered from 2.0 to 0.5 for more opportunities
     max_position_pct: float = Field(default=0.25, ge=0.0, le=1.0)
     max_positions: int = Field(default=3, ge=1)
     take_profit_pct: float = Field(default=5.0, ge=0.0)
