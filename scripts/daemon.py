@@ -1,16 +1,24 @@
-"""Auto-healing daemon — monitors bot process, restarts on crash.
+"""Auto-healing daemon — monitors bot process, restarts on crash. 24/7 reliable.
 
-Fixes vs v2:
+v3.3.0 daemon improvements (for 24/7 reliability):
+- NEVER give up: after crash loop threshold, switch to 5-min intervals (not exit)
+- Deep health check: verify HTTP /api/health AND WS status via /api/stats
+- Signal handling: graceful shutdown on SIGTERM/SIGINT
+- Disk space check: warn if disk > 90% full
+- Log rotation awareness: docker logs managed externally
+
+v3.1.0 daemon (baseline):
 - restart_count resets after uptime > 1 hour (stable)
 - Exponential backoff: 5s → 10s → 20s → 40s → 80s → 160s → 300s cap
-- Health check via /api/health HTTP endpoint (not just heartbeat file)
+- Health check via /api/health HTTP endpoint
 - Max 10 restarts per hour (crash loop protection)
-- Logs all restart events with timestamps
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -25,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger("daemon")
 
 
-def health_check_ok(host: str = "127.0.0.1", port: int = 8081, timeout: float = 3.0) -> bool:
+def health_check_ok(host: str = "127.0.0.1", port: int = 8082, timeout: float = 3.0) -> bool:
     """Check if bot HTTP server is responding."""
     import urllib.request
     import urllib.error
@@ -36,6 +44,59 @@ def health_check_ok(host: str = "127.0.0.1", port: int = 8081, timeout: float = 
             return resp.status == 200
     except Exception:
         return False
+
+
+def deep_health_check(host: str = "127.0.0.1", port: int = 8082, timeout: float = 5.0) -> tuple[bool, str]:
+    """v3.3.0: Deep health check — HTTP + WS status verification.
+
+    Returns (is_healthy, reason). Bot is healthy if:
+    - HTTP /api/health responds 200
+    - /api/stats shows WS connections active (clob + binance)
+    """
+    import urllib.request
+    import urllib.error
+    try:
+        # Check 1: basic HTTP health
+        url = f"http://{host}:{port}/api/health"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return False, f"HTTP {resp.status}"
+
+        # Check 2: WS status via /api/stats
+        url2 = f"http://{host}:{port}/api/stats"
+        req2 = urllib.request.Request(url2)
+        with urllib.request.urlopen(req2, timeout=timeout) as resp2:
+            if resp2.status != 200:
+                return False, f"stats HTTP {resp2.status}"
+            stats = json.loads(resp2.read().decode())
+
+        ws = stats.get("ws_status", {})
+        if not ws.get("clob_connected", False):
+            return False, "CLOB WS disconnected"
+        if not ws.get("binance_connected", False):
+            return False, "Binance WS disconnected"
+
+        # Check 3: WS data freshness (last message should be < 60s ago)
+        # If WS connected but no data flowing, it's stale
+        clob_tokens = ws.get("clob_tokens", 0)
+        if clob_tokens == 0:
+            return False, "CLOB WS: 0 tokens tracked"
+
+        return True, f"OK (clob={clob_tokens} tokens, uptime={stats.get('uptime_sec',0)}s)"
+
+    except Exception as e:
+        return False, f"check failed: {e}"
+
+
+def check_disk_space(path: str = "/app", threshold: float = 0.90) -> tuple[bool, float]:
+    """v3.3.0: Check disk space. Returns (is_ok, usage_pct)."""
+    try:
+        usage = shutil.disk_usage(path)
+        usage_pct = usage.used / usage.total
+        return usage_pct < threshold, usage_pct
+    except Exception:
+        return True, 0.0  # Don't fail on disk check error
 
 
 def run_bot() -> subprocess.Popen:
@@ -67,39 +128,97 @@ def run_bot() -> subprocess.Popen:
     return proc
 
 
+# v3.3.0: Global flag for graceful shutdown
+_shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """v3.3.0: Handle SIGTERM/SIGINT for graceful shutdown."""
+    global _shutdown_requested
+    sig_name = signal.Signals(signum).name
+    logger.info("Received %s — initiating graceful shutdown", sig_name)
+    _shutdown_requested = True
+
+
 def main() -> None:
-    # HTTP_HOST is for BINDING (0.0.0.0 = all interfaces).
-    # For health check CONNECTING, always use 127.0.0.1 (0.0.0.0 doesn't work as client dest).
+    global _shutdown_requested
+
+    # v3.3.0: Register signal handlers
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     port = int(os.environ.get("HTTP_PORT", "8082"))
     health_host = "127.0.0.1"
-    max_restart_per_hour = 10
-    restart_history: list[float] = []  # timestamps of recent restarts
+    crash_loop_threshold = 10  # restarts per hour before switching to long interval
+    long_interval = 300  # 5 min intervals after crash loop (NEVER give up)
+    restart_history: list[float] = []
     backoff_delays = [5, 10, 20, 40, 80, 160, 300]  # exponential
 
     # Write initial heartbeat
     Path("data").mkdir(exist_ok=True)
     Path("data/heartbeat.json").write_text('{"heartbeat": ' + str(time.time()) + '}')
 
-    logger.info("Daemon started — bot port=%d (health check via %s)", port, health_host)
+    logger.info("Daemon v3.3.0 started — bot port=%d (deep health check via %s)", port, health_host)
+    logger.info("Crash loop threshold: %d/hour → switch to %ds intervals (never give up)",
+                crash_loop_threshold, long_interval)
 
-    while True:
+    # v3.3.0: Periodic deep health check interval (every 60s)
+    deep_check_interval = 60
+    last_deep_check = 0.0
+
+    while not _shutdown_requested:
         proc = run_bot()
         start_time = time.time()
         uptime_threshold = 3600  # 1 hour
-        consecutive_restart_idx = 0  # Index into backoff_delays
+        consecutive_restart_idx = 0
+        last_deep_check = time.time()
 
-        while proc.poll() is None:
+        while proc.poll() is None and not _shutdown_requested:
             time.sleep(10)
-            # Health check via HTTP (more reliable than heartbeat file)
-            # Only check after 30s startup grace period
-            if time.time() - start_time > 30 and not health_check_ok(health_host, port):
-                logger.warning("Health check failed — killing bot for restart")
+            now = time.time()
+
+            # v3.3.0: Skip health check during 30s startup grace period
+            if now - start_time < 30:
+                continue
+
+            # Basic HTTP health check (every 10s)
+            if not health_check_ok(health_host, port):
+                logger.warning("Basic health check failed — killing bot for restart")
                 proc.kill()
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.terminate()
                 break
+
+            # v3.3.0: Deep health check (every 60s) — verify WS connectivity
+            if now - last_deep_check >= deep_check_interval:
+                last_deep_check = now
+                healthy, reason = deep_health_check(health_host, port)
+                if not healthy:
+                    logger.warning("Deep health check failed: %s — killing bot for restart", reason)
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.terminate()
+                    break
+
+                # v3.3.0: Disk space check (warn only, don't kill)
+                disk_ok, disk_pct = check_disk_space()
+                if not disk_ok:
+                    logger.error("Disk space CRITICAL: %.1f%% full — bot may fail soon", disk_pct * 100)
+                elif disk_pct > 0.85:
+                    logger.warning("Disk space high: %.1f%% full", disk_pct * 100)
+
+        if _shutdown_requested:
+            logger.info("Graceful shutdown — killing bot process")
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            break
 
         exit_code = proc.returncode
         uptime = time.time() - start_time
@@ -116,19 +235,26 @@ def main() -> None:
         restart_history = [t for t in restart_history if now - t < 3600]
         restart_history.append(now)
 
-        if len(restart_history) > max_restart_per_hour:
-            logger.error(
-                "Crash loop detected: %d restarts in last hour (max %d). Giving up.",
-                len(restart_history), max_restart_per_hour,
-            )
-            sys.exit(1)
+        restarts_this_hour = len(restart_history)
 
-        delay = backoff_delays[consecutive_restart_idx]
+        # v3.3.0: NEVER give up — switch to long interval after crash loop
+        if restarts_this_hour > crash_loop_threshold:
+            logger.error(
+                "CRASH LOOP: %d restarts in last hour (threshold %d). "
+                "Switching to %ds intervals (NOT giving up — 24/7 mode).",
+                restarts_this_hour, crash_loop_threshold, long_interval,
+            )
+            delay = long_interval
+        else:
+            delay = backoff_delays[consecutive_restart_idx]
+
         logger.warning(
             "Bot crashed (exit=%d, uptime=%.0fs) — restart in %ds (attempt %d this hour, idx=%d)",
-            exit_code, uptime, delay, len(restart_history), consecutive_restart_idx,
+            exit_code, uptime, delay, restarts_this_hour, consecutive_restart_idx,
         )
         time.sleep(delay)
+
+    logger.info("Daemon stopped gracefully")
 
 
 if __name__ == "__main__":
