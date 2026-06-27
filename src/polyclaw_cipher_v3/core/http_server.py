@@ -99,7 +99,7 @@ class HTTPServer:
             # Unprotected: safe to expose for docker / cluster healthchecks
             return {
                 "status": "ok",
-                "version": "3.4.3",
+                "version": "3.4.4",
                 "uptime_sec": int(time.time() - (self._start_time or time.time())),
             }
 
@@ -116,7 +116,7 @@ class HTTPServer:
                     METRICS["cash"].set(stats.get("cash", 0.0))
                     METRICS["pnl"].set(stats.get("pnl", 0.0))
                     METRICS["open_positions"].set(len(stats.get("open_positions", [])))
-                    METRICS["total_trades"].set(stats.get("total_trades", 0))
+                    METRICS["total_trades"].set(stats.get("trades", 0))  # v3.4.4: key is "trades" not "total_trades"
                     METRICS["win_rate"].set(stats.get("win_rate", 0.0))
                     METRICS["btc_price"].set(stats.get("btc_price", 0.0))
                     METRICS["uptime"].set(stats.get("uptime_sec", 0))
@@ -157,7 +157,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyClaw-Cipher v3.4.3 🔍</title>
+<title>PolyClaw-Cipher v3.4.4 🔍</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -304,7 +304,7 @@ body {
 <div class="wrap">
   <div class="hdr">
     <div>
-      <h1>🔍 PolyClaw-Cipher v3.4.3</h1>
+      <h1>🔍 PolyClaw-Cipher v3.4.4</h1>
       <div class="sub">Paper Trading · auto-refresh 5s · <span id="refresh-status" style="color:var(--green)">connecting...</span> · updated <span id="last-update">--</span></div>
     </div>
     <div style="text-align:right">

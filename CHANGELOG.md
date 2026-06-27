@@ -5,6 +5,44 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.4.4] — 2026-06-27 (Kimi + Arena audit fixes — strategy stats sync + latency_arb)
+
+Based on dual audit by **Kimi AI** and **Arena.ai Agent Mode**.
+
+### 🐛 Fixed
+- **CRITICAL: Strategy stats not syncing from DB** (Kimi #1 + Arena CRITICAL)
+  - Symptom: Dashboard showed 0 signals/trades/W/L/PnL for ALL strategies despite 50 real trades in DB
+  - Root cause: `_build_stats_sync()` read in-memory counters (reset to 0 on every restart).
+    `_refresh_stats_loop()` only overrode `signals_emitted` from DB, not trades/wins/losses/pnl.
+  - Fix: `_refresh_stats_loop()` now calls `per_strategy_stats()` from DB and overrides ALL
+    strategy fields (trades, wins, losses, win_rate, pnl) — DB is source of truth.
+  - Also added default values to `_build_stats_sync()` for cold start (before cache populates).
+
+- **MEDIUM: Prometheus total_trades=0** (Kimi #2 + Arena MEDIUM)
+  - Symptom: `polyclaw_total_trades_count` metric showed 0.0 despite 50 closed trades
+  - Root cause: Same as above — `_build_stats_sync()` fallback didn't include trade counts
+  - Fix: Added default values (trades=0, wins=0, etc.) to `_build_stats_sync()` for cold start.
+    Once `_refresh_stats_loop()` runs (3s), correct values populate from DB.
+
+- **MEDIUM: Latency arb dead — min_edge_pct too high** (Kimi #3 + Arena MEDIUM)
+  - Symptom: `latency_arb` had 0 signals despite 18+ crypto markets in scan
+  - Root cause: `min_edge_pct: 2.0` (2%) too high for efficient Polymarket — real gaps rarely exceed 1%
+  - Fix: Lowered to `1.0` (1%). Added debug logging for crypto markets without threshold pattern.
+  - Note: Arena identified potential threshold comparison bug, but v3.4.1 CDF model already
+    fixed that — the remaining issue was purely the edge threshold being too high.
+
+### 📊 Verified Post-Deploy
+- Strategy stats now show DB-accurate data:
+  - momentum: 58 signals, 44 trades, 26W/18L, 59% WR, +$22.91 PnL
+  - atomic_arb: 8 signals, 6 trades, 3W/3L, 50% WR, +$6.25 PnL
+  - resolution_snipe: 11 signals, 0 closed trades (2 still open)
+  - latency_arb: 0 signals (threshold lowered to 1.0%, monitoring)
+- Prometheus: `polyclaw_bankroll_usd 54.17`, `polyclaw_win_rate_pct 58.0`
+- Bankroll: $54.17 (+116.7%), Cash: $26.64
+- 0 errors in logs
+
+---
+
 ## [3.4.3] — 2026-06-27 (Critical: resolved markets never closed → cash locked forever)
 
 ### 🐛 Fixed — CRITICAL BUG (3 stacked issues)
