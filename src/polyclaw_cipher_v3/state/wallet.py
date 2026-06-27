@@ -1,10 +1,19 @@
-"""Wallet state — bankroll & cash management via SQLite."""
+"""Wallet state — bankroll & cash management via SQLite.
+
+v3.4.0 FIX: Added InsufficientFundsError guard on debit() to prevent
+negative cash from concurrent signal execution (BUG-C2).
+"""
 from __future__ import annotations
 
 import logging
 import time
 
 logger = logging.getLogger(__name__)
+
+
+class InsufficientFundsError(Exception):
+    """Raised when wallet has insufficient cash for a debit operation."""
+    pass
 
 
 class Wallet:
@@ -47,13 +56,35 @@ class Wallet:
     def cash(self) -> float:
         return self._cash
 
+    def has_funds(self, amount: float) -> bool:
+        """Check if wallet has sufficient cash for a debit. Thread-safe pre-check."""
+        return self._cash >= amount
+
     async def debit(self, amount: float) -> None:
-        """Reduce cash (when opening position)."""
+        """Reduce cash (when opening position).
+
+        v3.4.0 FIX (BUG-C2): Guard against negative cash.
+        If 2 signals execute nearly simultaneously, both could pass sizer checks
+        but combined debit exceeds available cash. This guard prevents corruption.
+
+        Raises:
+            InsufficientFundsError: if cash < amount
+        """
+        if amount <= 0:
+            logger.warning("Wallet debit called with non-positive amount: $%.4f", amount)
+            return
+        if self._cash < amount:
+            raise InsufficientFundsError(
+                f"Insufficient cash: have ${self._cash:.4f}, need ${amount:.4f} "
+                f"(shortfall ${amount - self._cash:.4f})"
+            )
         self._cash -= amount
         await self._save()
 
     async def credit(self, amount: float) -> None:
         """Add cash (when closing position — return invested + pnl)."""
+        if amount < 0:
+            logger.warning("Wallet credit called with negative amount: $%.4f (treating as loss)", amount)
         self._cash += amount
         await self._save()
 

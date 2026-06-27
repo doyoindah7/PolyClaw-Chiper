@@ -139,6 +139,25 @@ class Database:
         await self.db.commit()
         return cursor
 
+    async def execute_no_commit(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
+        """v3.4.0: Execute without commit — for use inside batch transactions."""
+        return await self.db.execute(sql, params)
+
+    async def execute_batch(self, operations: list[tuple[str, tuple]]) -> None:
+        """v3.4.0 FIX (BUG-C6): Execute multiple operations in a single transaction.
+
+        Ensures atomicity for multi-step flows like position close:
+        DELETE position + INSERT trade + UPDATE wallet = single commit.
+        Prevents partial state corruption on crash mid-flow.
+        """
+        for sql, params in operations:
+            await self.db.execute(sql, params)
+        await self.db.commit()
+
+    async def commit(self) -> None:
+        """v3.4.0: Explicit commit for manual transaction control."""
+        await self.db.commit()
+
     async def fetchone(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
         async with self.db.execute(sql, params) as cursor:
             return await cursor.fetchone()

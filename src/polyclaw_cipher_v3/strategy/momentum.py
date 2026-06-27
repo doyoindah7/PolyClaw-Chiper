@@ -37,9 +37,11 @@ class MomentumStrategy(BaseStrategy):
         self.max_notional_pct = c.get("max_notional_pct", 0.15)
         self.min_confidence = c.get("min_confidence", 0.40)
         self.max_volatility = c.get("max_volatility", 0.08)
-        # FIX: Category filter — skip random-outcome markets
+        # FIX v3.4.0 (ARCH-1): Category filter — skip random-outcome markets
         self.skip_random_outcome = c.get("skip_random_outcome", True)
-        self.allowed_categories = c.get("allowed_categories", ["crypto", "sports_derivative", "economics", "other"])
+        # Updated fallback default from stale "sports_derivative"
+        # to match v3.3's category split (sports_total = O/U, sports_spread = excluded)
+        self.allowed_categories = c.get("allowed_categories", ["crypto", "sports_total", "economics", "other"])
         self._clob = clob_feed
         self._entry_prices: dict[str, float] = {}
         self._entry_times: dict[str, float] = {}

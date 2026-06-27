@@ -127,11 +127,9 @@ class BinanceFeed:
                             break
                         self.last_message_ts = time.time()
                         await self._handle(raw)
-                        await self.event_bus.publish("ws_status", {
-                            "source": "binance",
-                            "connected": True,
-                            "last_message_ts": self.last_message_ts,
-                        })
+                        # v3.4.0 FIX (ARCH-2): Removed per-tick ws_status publish.
+                        # Was firing 5-20x/sec with zero subscribers — pure waste.
+                        # Status already published on disconnect in except block below.
             except Exception as e:
                 self.connected = False
                 self.reconnect_count += 1

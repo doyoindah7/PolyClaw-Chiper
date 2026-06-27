@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class ResolutionSnipeStrategy(BaseStrategy):
     name = "resolution_snipe"
 
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(self, config: dict[str, Any] | None = None, clob_feed=None):
         super().__init__(config)
         c = self.config
         self.min_odds = c.get("min_odds", 0.90)
@@ -37,6 +37,8 @@ class ResolutionSnipeStrategy(BaseStrategy):
         self.skip_random_outcome = c.get("skip_random_outcome", True)
         self.allowed_categories = c.get("allowed_categories", ["crypto", "economics", "other"])
         self._llm_client = None
+        # v3.4.0 FIX (BUG-C5): Use CLOB WS for real-time prices
+        self._clob = clob_feed
         self._entry_prices: dict[str, float] = {}
         # v3.3.0: Opportunity-rate tracking (Claude's suggestion)
         self._opportunity_scan_count: int = 0  # Total markets evaluated
@@ -47,6 +49,10 @@ class ResolutionSnipeStrategy(BaseStrategy):
         self._llm_client = llm_client
         self.llm_enabled = True
         logger.info("ResolutionSnipe: LLM client injected, LLM mode enabled")
+
+    def set_clob_feed(self, clob_feed) -> None:
+        """v3.4.0: Inject CLOB feed for real-time price data."""
+        self._clob = clob_feed
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         # v3.3.0: Opportunity-rate logging (Claude's suggestion)
@@ -93,15 +99,26 @@ class ResolutionSnipeStrategy(BaseStrategy):
         if any(p.market_condition_id == market.condition_id for p in my_positions):
             return None
 
+        # v3.4.0 FIX (BUG-C5): Use CLOB WS for real-time prices instead of stale Gamma API
+        # market.yes_price is from scanner (60s ago). CLOB WS has ~50ms lag.
+        if self._clob:
+            clob_yes = self._clob.get_price(market.yes_token_id)
+            clob_no = self._clob.get_price(market.no_token_id)
+            yes_price = clob_yes if clob_yes > 0 else market.yes_price
+            no_price = clob_no if clob_no > 0 else market.no_price
+        else:
+            yes_price = market.yes_price
+            no_price = market.no_price
+
         # Find side with high odds (near-certain)
-        if market.yes_price >= self.min_odds and market.yes_price <= self.max_odds:
+        if yes_price >= self.min_odds and yes_price <= self.max_odds:
             side = Side.YES
-            entry_price = market.yes_price
+            entry_price = yes_price
             token_id = market.yes_token_id
             near_certain_side = "YES"
-        elif market.no_price >= self.min_odds and market.no_price <= self.max_odds:
+        elif no_price >= self.min_odds and no_price <= self.max_odds:
             side = Side.NO
-            entry_price = market.no_price
+            entry_price = no_price
             token_id = market.no_token_id
             near_certain_side = "NO"
         else:

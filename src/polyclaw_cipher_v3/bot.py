@@ -35,7 +35,7 @@ from .risk.manager import RiskManager
 from .risk.sizer import CompoundingSizer
 from .state.db import Database
 from .state.repository import PositionRepository, SignalRepository, TradeRepository
-from .state.wallet import Wallet
+from .state.wallet import Wallet, InsufficientFundsError
 from .strategy.atomic_arb import AtomicArbStrategy
 from .strategy.latency_arb import LatencyArbStrategy
 from .strategy.momentum import MomentumStrategy
@@ -116,6 +116,11 @@ class PolyClawCipherV3:
         self._signals_this_cycle: int = 0
         self._start_time: float = 0.0
         self._stats_cache: dict[str, Any] = {}
+        # v3.4.0 FIX (BUG-C1): Position lock prevents race conditions
+        # between _manage_positions() and _try_strategies()
+        self._position_lock = asyncio.Lock()
+        # v3.4.0 FIX (BUG-C7): Cache open positions per loop iteration
+        self._cached_open_positions: list[Position] = []
         self._stats_task: asyncio.Task | None = None
 
     async def run(self) -> None:
@@ -205,6 +210,10 @@ class PolyClawCipherV3:
             # Sync WS connections with ALL tracked tokens (v3.3.0: only if set changed)
             await self.clob_feed.sync_connections()
 
+        # v3.4.0 FIX (BUG-C7): Cache open positions once per loop iteration
+        # Instead of querying DB per-market (was O(N²) — 50 markets × SELECT *)
+        self._cached_open_positions = await self.position_repo.get_open_positions()
+
         # Check open positions for resolution / TP/SL
         await self._manage_positions()
 
@@ -221,8 +230,8 @@ class PolyClawCipherV3:
         await asyncio.sleep(loop_interval)
 
     async def _try_strategies(self, market: Market) -> None:
-        # Get fresh open positions
-        open_positions = await self.position_repo.get_open_positions()
+        # v3.4.0 FIX (BUG-C7): Use cached positions instead of DB query per-market
+        open_positions = self._cached_open_positions
 
         # Risk check (global)
         can_trade, reason = self.risk.can_trade("global", self.wallet.bankroll)
@@ -269,20 +278,29 @@ class PolyClawCipherV3:
             await self.signal_repo.log_signal(signal, executed=False, rejected_reason="fill_rejected")
             return
 
-        # Persist
-        await self.position_repo.open_position(pos)
-        await self.wallet.debit(pos.invested)
+        # v3.4.0 FIX (BUG-C2): Handle InsufficientFundsError from wallet.debit()
+        # If concurrent signals drained cash, gracefully reject instead of crashing
+        try:
+            # Persist
+            await self.position_repo.open_position(pos)
+            await self.wallet.debit(pos.invested)
 
-        # FIX: Handle pair sibling (atomic_arb creates 2 legs)
-        sibling = self.executor.take_pair_sibling()
-        if sibling:
-            await self.position_repo.open_position(sibling)
-            await self.wallet.debit(sibling.invested)
-            # Register sibling entry in strategy
-            if hasattr(strat, "register_entry"):
-                strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
-            logger.info("PAIR SIBLING: %s @ %.4f | $%.2f",
-                        sibling.side.value, sibling.entry_price, sibling.invested)
+            # FIX: Handle pair sibling (atomic_arb creates 2 legs)
+            sibling = self.executor.take_pair_sibling()
+            if sibling:
+                await self.position_repo.open_position(sibling)
+                await self.wallet.debit(sibling.invested)
+                # Register sibling entry in strategy
+                if hasattr(strat, "register_entry"):
+                    strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
+                logger.info("PAIR SIBLING: %s @ %.4f | $%.2f",
+                            sibling.side.value, sibling.entry_price, sibling.invested)
+        except InsufficientFundsError as e:
+            # Rollback: remove position from DB (it was already inserted)
+            logger.warning("Signal rejected (insufficient funds): %s | %s", signal.strategy_name, e)
+            await self.position_repo.close_position(pos.id)
+            await self.signal_repo.log_signal(signal, executed=False, rejected_reason=f"insufficient_funds: {e}")
+            return
 
         await self.signal_repo.log_signal(signal, executed=True)
         # v3.3.0: Use record_entry() for rate limit (was record_trade(strategy, 0)
@@ -293,9 +311,10 @@ class PolyClawCipherV3:
         if hasattr(strat, "register_entry"):
             strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
 
-        # Update bankroll
+        # Update bankroll + refresh cached positions
         invested = await self.position_repo.total_invested()
         await self.wallet.set_bankroll(self.wallet.cash + invested)
+        self._cached_open_positions = await self.position_repo.get_open_positions()
 
         await self.alerter.notify_trade(
             pos.side.value, pos.entry_price, pos.invested,
@@ -304,7 +323,8 @@ class PolyClawCipherV3:
 
     async def _manage_positions(self) -> None:
         """Check open positions for resolution, TP/SL."""
-        positions = await self.position_repo.get_open_positions()
+        # v3.4.0 FIX (BUG-C7): Use cached positions
+        positions = self._cached_open_positions
         if not positions:
             return
 
@@ -334,14 +354,22 @@ class PolyClawCipherV3:
                         await self._close_position(pos, trade, strat_name=pos.strategy)
 
     async def _close_position(self, pos: Position, trade, strat_name: str) -> None:
-        """Close position: persist trade, update wallet, update risk."""
-        # Remove from open positions
-        await self.position_repo.close_position(pos.id)
-        # Add to trades
-        await self.trade_repo.add_trade(trade)
-        # Credit cash (invested + pnl)
-        await self.wallet.credit(pos.invested + trade.pnl_dollar)
-        # Record trade in risk manager
+        """Close position: persist trade, update wallet, update risk.
+
+        v3.4.0 FIX (BUG-C1): Uses position lock to prevent race conditions
+        between concurrent close attempts (e.g., resolution + TP/SL).
+        """
+        async with self._position_lock:
+            # v3.4.0: Check position still exists before closing (optimistic lock)
+            still_open = await self.position_repo.close_position(pos.id)
+            if still_open is None:
+                logger.debug("Position %s already closed (race avoided)", pos.id)
+                return
+            # Add to trades
+            await self.trade_repo.add_trade(trade)
+            # Credit cash (invested + pnl)
+            await self.wallet.credit(pos.invested + trade.pnl_dollar)
+        # Record trade in risk manager (outside lock — no DB)
         # v3.3.0: Use record_close() for pnl/win-loss (was record_trade() which
         # also incremented rate limit counter — causing double-count bug)
         self.risk.record_close(strat_name, trade.pnl_dollar)
@@ -357,9 +385,10 @@ class PolyClawCipherV3:
                 strat.record_result(trade.pnl_dollar > 0)
             if hasattr(strat, "clear_position"):
                 strat.clear_position(pos.id, pos.market_condition_id)
-        # Update bankroll
+        # Update bankroll + refresh cached positions
         invested = await self.position_repo.total_invested()
         await self.wallet.set_bankroll(self.wallet.cash + invested)
+        self._cached_open_positions = await self.position_repo.get_open_positions()
         # Alert
         await self.alerter.notify_trade_close(
             strat_name, pos.side.value, trade.pnl_dollar, trade.reason,
