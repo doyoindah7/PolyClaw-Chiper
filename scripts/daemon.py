@@ -99,6 +99,19 @@ def check_disk_space(path: str = "/app", threshold: float = 0.90) -> tuple[bool,
         return True, 0.0  # Don't fail on disk check error
 
 
+def kill_bot_gracefully(proc: subprocess.Popen, timeout: float = 10.0) -> None:
+    """v3.4.2: Send SIGTERM to bot, wait up to timeout seconds, fall back to SIGKILL if still running."""
+    logger.info("Sending SIGTERM to bot for graceful shutdown...")
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+        logger.info("Bot exited gracefully.")
+    except subprocess.TimeoutExpired:
+        logger.warning("Bot did not exit within %.1fs, forcing SIGKILL...", timeout)
+        proc.kill()
+        proc.wait()
+
+
 def run_bot() -> subprocess.Popen:
     """Start the bot process."""
     env = dict(os.environ)
@@ -183,12 +196,8 @@ def main() -> None:
 
             # Basic HTTP health check (every 10s)
             if not health_check_ok(health_host, port):
-                logger.warning("Basic health check failed — killing bot for restart")
-                proc.kill()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
+                logger.warning("Basic health check failed — restarting bot")
+                kill_bot_gracefully(proc)
                 break
 
             # v3.3.0: Deep health check (every 60s) — verify WS connectivity
@@ -196,12 +205,8 @@ def main() -> None:
                 last_deep_check = now
                 healthy, reason = deep_health_check(health_host, port)
                 if not healthy:
-                    logger.warning("Deep health check failed: %s — killing bot for restart", reason)
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.terminate()
+                    logger.warning("Deep health check failed: %s — restarting bot", reason)
+                    kill_bot_gracefully(proc)
                     break
 
                 # v3.3.0: Disk space check (warn only, don't kill)
@@ -212,12 +217,8 @@ def main() -> None:
                     logger.warning("Disk space high: %.1f%% full", disk_pct * 100)
 
         if _shutdown_requested:
-            logger.info("Graceful shutdown — killing bot process")
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            logger.info("Graceful shutdown requested for daemon — exiting bot")
+            kill_bot_gracefully(proc)
             break
 
         exit_code = proc.returncode

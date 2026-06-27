@@ -105,7 +105,7 @@ class PolyClawCipherV3:
             host=web_conf.get("host", "0.0.0.0"),
             port=web_conf.get("port", 8082),
             get_stats=self._get_stats,
-            config={},
+            config=self.config,
         )
 
         # State

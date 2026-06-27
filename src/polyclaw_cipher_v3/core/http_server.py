@@ -18,11 +18,28 @@ import logging
 import time
 from typing import Any
 
-import httpx
-from fastapi import FastAPI
+import secrets
+import uvicorn
+from fastapi import FastAPI, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Gauge
 
 logger = logging.getLogger(__name__)
+
+security = HTTPBasic()
+
+# v3.4.2: Core Prometheus metrics gauges
+METRICS = {
+    "bankroll": Gauge("polyclaw_bankroll_usd", "Current wallet bankroll in USD"),
+    "cash": Gauge("polyclaw_cash_usd", "Current available cash in USD"),
+    "pnl": Gauge("polyclaw_pnl_usd", "Net realized PnL in USD"),
+    "open_positions": Gauge("polyclaw_open_positions_count", "Current open positions count"),
+    "total_trades": Gauge("polyclaw_total_trades_count", "Total closed trades count"),
+    "win_rate": Gauge("polyclaw_win_rate_pct", "Win rate percentage of trades"),
+    "btc_price": Gauge("polyclaw_btc_price_usd", "Real-time BTC price from Binance stream"),
+    "uptime": Gauge("polyclaw_uptime_seconds", "Bot process uptime in seconds"),
+}
 
 
 class HTTPServer:
@@ -46,31 +63,64 @@ class HTTPServer:
         self._setup_routes()
 
     def _setup_routes(self) -> None:
+        web_conf = self.config.get("monitoring", {}).get("web", {})
+        username = web_conf.get("username", "admin")
+        password = web_conf.get("password", "secure_polyclaw_password_123")
+
+        async def get_current_user(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
+            # Local checks from the daemon on 127.0.0.1 bypass auth to prevent healthcheck loops
+            if request.client and request.client.host in ("127.0.0.1", "localhost", "::1"):
+                return "local"
+
+            correct_username = secrets.compare_digest(credentials.username, username)
+            correct_password = secrets.compare_digest(credentials.password, password)
+            if not (correct_username and correct_password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Incorrect username or password",
+                    headers={"WWW-Authenticate": "Basic"},
+                )
+            return credentials.username
+
         @self.app.get("/", response_class=HTMLResponse)
-        async def dashboard():
+        async def dashboard(user: str = Depends(get_current_user)):
             return DASHBOARD_HTML
 
         @self.app.get("/api/stats")
-        async def stats():
+        async def stats(user: str = Depends(get_current_user)):
             if self.get_stats:
                 return JSONResponse(self.get_stats())
             return JSONResponse({"error": "stats callback not set"}, status_code=500)
 
         @self.app.get("/api/health")
         async def health():
+            # Unprotected: safe to expose for docker / cluster healthchecks
             return {
                 "status": "ok",
-                "version": "3.3.1",
+                "version": "3.4.2",
                 "uptime_sec": int(time.time() - (self._start_time or time.time())),
             }
 
         @self.app.get("/api/config")
-        async def config_endpoint():
+        async def config_endpoint(user: str = Depends(get_current_user)):
             return JSONResponse(self.config)
 
-        @self.app.get("/metrics", response_class=PlainTextResponse)
-        async def metrics():
-            return "# v3 metrics endpoint (stub)\n"
+        @self.app.get("/metrics")
+        async def metrics(user: str = Depends(get_current_user)):
+            if self.get_stats:
+                try:
+                    stats = self.get_stats()
+                    METRICS["bankroll"].set(stats.get("bankroll", 0.0))
+                    METRICS["cash"].set(stats.get("cash", 0.0))
+                    METRICS["pnl"].set(stats.get("pnl", 0.0))
+                    METRICS["open_positions"].set(len(stats.get("open_positions", [])))
+                    METRICS["total_trades"].set(stats.get("total_trades", 0))
+                    METRICS["win_rate"].set(stats.get("win_rate", 0.0))
+                    METRICS["btc_price"].set(stats.get("btc_price", 0.0))
+                    METRICS["uptime"].set(stats.get("uptime_sec", 0))
+                except Exception as e:
+                    logger.error("Failed to update Prometheus metrics: %s", e)
+            return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     async def start(self) -> None:
         import uvicorn
