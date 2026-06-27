@@ -39,25 +39,46 @@ def parse_resolution(item: dict[str, Any]) -> tuple[bool, list[str]]:
 
 
 def get_winning_side(market: Market) -> Side | None:
-    """Determine winning side from resolvedBy token IDs.
+    """Determine winning side from market resolution.
 
-    Returns None if market not yet resolved or resolution ambiguous.
+    v3.4.3 FIX: resolvedBy field contains oracle ADDRESS, not token IDs.
+    Use outcome prices instead: winning side has price ~1.0, losing side ~0.0.
+
+    Returns None if market not yet resolved or ambiguous.
     """
-    if not market.is_closed or not market.resolved_by:
+    if not market.is_closed:
         return None
-    if market.yes_token_id and market.yes_token_id in market.resolved_by:
+
+    # v3.4.3: Try resolvedBy first (in case format changes to token IDs)
+    if market.resolved_by:
+        if market.yes_token_id and market.yes_token_id in market.resolved_by:
+            return Side.YES
+        if market.no_token_id and market.no_token_id in market.resolved_by:
+            return Side.NO
+
+    # v3.4.3: Fallback — use outcome prices (winning side ≈ 1.0, losing ≈ 0.0)
+    if market.yes_price >= 0.95:
         return Side.YES
-    if market.no_token_id and market.no_token_id in market.resolved_by:
+    if market.no_price >= 0.95:
         return Side.NO
+    if market.yes_price <= 0.05:
+        return Side.NO
+    if market.no_price <= 0.05:
+        return Side.YES
+
     # Ambiguous — log and return None
     logger.warning(
-        "Ambiguous resolution for %s: resolvedBy=%s, yes_token=%s, no_token=%s",
-        market.condition_id[:8], market.resolved_by,
-        market.yes_token_id[:8], market.no_token_id[:8],
+        "Ambiguous resolution for %s: yes_price=%.4f no_price=%.4f",
+        market.condition_id[:8], market.yes_price, market.no_price,
     )
     return None
 
 
 def is_truly_resolved(market: Market) -> bool:
-    """True only if market is closed AND has winning side determined."""
+    """True only if market is closed AND has winning side determined.
+
+    v3.4.3: Now uses price-based detection (winning side ≈ 1.0).
+    """
+    if not market.is_closed:
+        return False
     return get_winning_side(market) is not None

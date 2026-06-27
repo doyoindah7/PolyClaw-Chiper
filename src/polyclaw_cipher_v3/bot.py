@@ -363,7 +363,13 @@ class PolyClawCipherV3:
             self.wallet.release(required_cash)
 
     async def _manage_positions(self) -> None:
-        """Check open positions for resolution, TP/SL."""
+        """Check open positions for resolution, TP/SL.
+
+        v3.4.3 FIX: When market is not in active scan (market_map returns None),
+        fetch it from Gamma API to check if it's resolved. Previously, resolved
+        markets dropped out of scan (scanner queries active=true only) and positions
+        stayed open FOREVER — locking cash indefinitely.
+        """
         # v3.4.0 FIX (BUG-C7): Use cached positions
         positions = self._cached_open_positions
         if not positions:
@@ -374,8 +380,20 @@ class PolyClawCipherV3:
         for pos in positions[:]:
             market = market_map.get(pos.market_condition_id)
 
-            # Refresh market from API if we have it but it's potentially stale
-            # (Resolution check — real, not fake)
+            # v3.4.3 FIX: If market not in active scan, fetch from Gamma API
+            # This handles resolved markets that dropped out of scan (active=true filter)
+            if market is None:
+                try:
+                    market = await self.scanner.fetch_market(pos.market_condition_id)
+                    if market and market.is_closed:
+                        logger.info(
+                            "Position %s market resolved (was not in active scan): %s",
+                            pos.id, pos.market_question[:40],
+                        )
+                except Exception as e:
+                    logger.debug("Failed to fetch market %s: %s", pos.market_condition_id[:8], e)
+
+            # Resolution check — real, not fake
             if market and market.is_closed:
                 winner = get_winning_side(market)
                 if winner is not None:

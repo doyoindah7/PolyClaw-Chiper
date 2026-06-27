@@ -139,13 +139,34 @@ class MarketScanner:
         return markets
 
     async def fetch_market(self, condition_id: str) -> Market | None:
-        """Fetch single market by condition_id (for resolution check)."""
+        """Fetch single market by condition_id (for resolution check).
+
+        v3.4.3 FIX: Gamma API doesn't support condition_id filter parameter.
+        Workaround: fetch closed markets batch + filter client-side.
+        Returns first matching market or None.
+        """
         client = await self._ensure_client()
         try:
-            resp = await client.get(f"{self.api}/markets/{condition_id}")
+            # Fetch recently closed markets (limit 200, ordered by volume)
+            resp = await client.get(
+                f"{self.api}/markets",
+                params={
+                    "closed": "true",
+                    "limit": "200",
+                    "order": "volume24hr",
+                    "ascending": "false",
+                }
+            )
             resp.raise_for_status()
-            item = resp.json()
-            return self._parse(item) if item else None
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("markets", [])
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_cid = item.get("conditionId") or item.get("condition_id")
+                if item_cid and item_cid == condition_id:
+                    return self._parse(item)
+            return None
         except Exception as e:
             logger.debug("Fetch market %s failed: %s", condition_id[:8], e)
             return None
