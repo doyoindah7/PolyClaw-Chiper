@@ -302,6 +302,7 @@ body {
 </head>
 <body>
 <div class="wrap">
+  <div id="alerts-container"></div>
   <div class="hdr">
     <div>
       <h1>🔍 PolyClaw-Cipher v3.5.0</h1>
@@ -367,6 +368,18 @@ body {
     </div>
   </div>
 
+  <!-- Recent Signals (collapsible) -->
+  <div class="card" style="margin-bottom:14px" id="signals-card">
+    <div class="card-title" style="cursor:pointer" onclick="togglePanel('signals-panel')">
+      <span>📡 Recent Signals</span>
+      <span class="badge" id="signal-count">0</span>
+      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px">[click to expand]</span>
+    </div>
+    <div class="scroll-list" id="signals-panel" style="display:none">
+      <div class="empty">No signals in session</div>
+    </div>
+  </div>
+
   <!-- Risk + System Status -->
   <div class="cols">
     <div class="card">
@@ -389,6 +402,7 @@ body {
         <div class="status-item"><div class="s-lbl">CLOB WS</div><div class="s-val" id="sys-clob">--</div></div>
         <div class="status-item"><div class="s-lbl">Binance WS</div><div class="s-val" id="sys-binance">--</div></div>
         <div class="status-item"><div class="s-lbl">BTC Price</div><div class="s-val" id="sys-btc">--</div></div>
+        <div class="status-item" style="grid-column:span 2"><div class="s-lbl">Markets</div><div class="cat-grid" id="market-dist"></div></div>
         <div class="status-item"><div class="s-lbl">Uptime</div><div class="s-val" id="sys-uptime">--</div></div>
         <div class="status-item"><div class="s-lbl">Last Signal</div><div class="s-val" id="sys-last-signal">--</div></div>
         <div class="status-item"><div class="s-lbl">Last Trade</div><div class="s-val" id="sys-last-trade">--</div></div>
@@ -555,9 +569,36 @@ function renderStrategies(d) {
       '<div class="strat-stat"><div class="s-lbl">Trades</div><div class="s-val">' + (s.trades||0) + '</div></div>' +
       '<div class="strat-stat"><div class="s-lbl">W/L</div><div class="s-val">' + (s.wins||0) + '/' + (s.losses||0) + '</div></div>' +
       '<div class="strat-stat"><div class="s-lbl">PnL</div><div class="s-val ' + pnlCls + '">' + (s.pnl>=0?'+':'') + '$' + fmt(s.pnl||0, 4) + '</div></div>' +
-      '<div class="strat-stat"><div class="s-lbl">WR</div><div class="s-val">' + fmt(wr, 0) + '%</div></div>' +
+      '<div class="strat-stat"><div class="s-lbl">Exec%</div><div class="s-val" style="color:' + (s.signals_emitted>0 && (s.trades||0)/s.signals_emitted>0.5 ? 'var(--green)' : 'var(--gold)') + '">' + fmt(s.signals_emitted>0 ? ((s.trades||0)/s.signals_emitted*100) : 0, 0) + '%</div></div>' +
       '</div></div>';
   }
+  cont.innerHTML = html;
+}
+
+function renderSignals(d) {
+  const signals = d.recent_signals || [];
+  const cont = document.getElementById('signals-panel');
+  document.getElementById('signal-count').textContent = signals.length;
+  if (signals.length === 0) {
+    cont.innerHTML = '<div class="empty">No signals in session</div>';
+    return;
+  }
+  let html = '<table class="tbl"><thead><tr><th>Time</th><th>Strat</th><th>Side</th><th>Price</th><th>Conf</th><th>Size</th><th>Exec</th><th>Reject</th></tr></thead><tbody>';
+  for (const s of signals.slice().reverse()) {
+    const strat = s.strategy || '';
+    const execMark = s.executed ? '✅' : '❌';
+    html += '<tr>' +
+      '<td style="color:var(--muted);font-size:0.6rem">' + timeAgo(s.timestamp) + '</td>' +
+      '<td><span class="tag ' + strat + '">' + strat + '</span></td>' +
+      '<td class="side-' + (s.side||'') + '">' + (s.side||'') + '</td>' +
+      '<td>$' + fmt(s.suggested_price, 4) + '</td>' +
+      '<td>' + fmt(s.confidence, 2) + '</td>' +
+      '<td>$' + fmt(s.suggested_size_usd, 2) + '</td>' +
+      '<td style="color:' + (s.executed ? 'var(--green)' : 'var(--muted)') + '">' + execMark + '</td>' +
+      '<td style="color:var(--red);font-size:0.58rem;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + (s.rejected_reason||'') + '">' + (s.rejected_reason||'') + '</td>' +
+      '</tr>';
+  }
+  html += '</tbody></table>';
   cont.innerHTML = html;
 }
 
@@ -654,6 +695,134 @@ function renderSystem(d) {
     tradeEl.textContent = 'never';
     tradeEl.style.color = 'var(--muted)';
   }
+}
+
+function renderAlerts(d) {
+  const alerts = [];
+  const botStatus = d.bot_status || 'UNKNOWN';
+  const ws = d.ws_status || {};
+  
+  // Bot status alert
+  if (botStatus === 'STAGNANT') {
+    alerts.push({ level: 'error', msg: '⚠️ BOT STAGNANT — No activity for 15+ minutes. Daemon restarting...' });
+  } else if (botStatus === 'CASH_STUCK') {
+    alerts.push({ level: 'error', msg: '💰 CASH STUCK — Positions blocking trade execution. Restart recommended.' });
+  } else if (botStatus === 'IDLE') {
+    alerts.push({ level: 'warn', msg: '📊 IDLE — No positions, no trades. Waiting for opportunities...' });
+  }
+  
+  // WS alerts
+  if (!ws.clob_connected) {
+    alerts.push({ level: 'error', msg: '🔌 CLOB WebSocket DISCONNECTED' });
+  }
+  if (ws.clob_reconnects > 3) {
+    alerts.push({ level: 'warn', msg: '📡 CLOB reconnecting often: ' + ws.clob_reconnects + 'x' });
+  }
+  if (!ws.binance_connected) {
+    alerts.push({ level: 'error', msg: '📊 Binance WebSocket DISCONNECTED' });
+  }
+  
+  // Strategy disabled
+  const disabled = d.risk?.disabled_strategies || [];
+  if (disabled.length > 0) {
+    alerts.push({ level: 'warn', msg: '🛡️ Strategies disabled: ' + disabled.join(', ') });
+  }
+  
+  // High deployment
+  const invPct = d.deployed && d.bankroll ? (d.deployed / d.bankroll * 100) : 0;
+  if (invPct > 85) {
+    alerts.push({ level: 'warn', msg: '📊 High deployment: ' + Math.round(invPct) + '% — consider cash buffer' });
+  }
+  
+  // Render
+  const alertDiv = document.getElementById('alerts-container');
+  if (alerts.length === 0) {
+    alertDiv.style.display = 'none';
+    alertDiv.innerHTML = '';
+  } else {
+    alertDiv.style.display = 'block';
+    alertDiv.innerHTML = alerts.map(a => 
+      '<div class="alert-banner alert-' + a.level + '">' + a.msg + '</div>'
+    ).join('');
+  }
+}
+
+function togglePanel(id) {
+  const el = document.getElementById(id);
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function timeAgo(ts) {
+  if (!ts) return '--';
+  const s = Math.floor(Date.now()/1000 - ts);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm';
+  if (s < 86400) return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+  return Math.floor(s/86400) + 'd';
+}
+
+function updateBotStatus(d) {
+  const status = d.bot_status || 'UNKNOWN';
+  const badge = document.getElementById('bot-status-badge');
+  const text = document.getElementById('bot-status-text');
+  const colors = {
+    'ACTIVE': 'var(--green)',
+    'IDLE': 'var(--orange)',
+    'STAGNANT': 'var(--red)',
+    'CASH_STUCK': 'var(--red)',
+    'STARTING': 'var(--gold)',
+    'UNKNOWN': 'var(--muted)'
+  };
+  badge.style.background = colors[status] || 'var(--muted)';
+  text.textContent = status;
+  text.style.color = colors[status] || 'var(--muted)';
+  
+  // Update version dynamically
+  const versionEl = document.getElementById('bot-version');
+  if (versionEl && d.version) versionEl.textContent = d.version;
+}
+
+function renderMarketDist(d) {
+  const cats = d.market_categories || {};
+  const cont = document.getElementById('market-dist');
+  const colorMap = {
+    'crypto': 'crypto', 'sports_match': 'sports', 'sports_total': 'sports_total',
+    'sports_spread': 'sports', 'economics': 'economics', 'politics': 'politics',
+    'other': 'other', 'entertainment': 'other'
+  };
+  let html = '';
+  for (const [cat, count] of Object.entries(cats)) {
+    const cls = colorMap[cat] || 'other';
+    html += '<div class="cat-chip cat-' + cls + '">' + cat.replace('_',' ') + ': ' + count + '</div>';
+  }
+  cont.innerHTML = html || '<span style="color:var(--muted);font-size:0.6rem">loading...</span>';
+}
+
+function renderSystem(d) {
+  document.getElementById('sys-markets').textContent = d.markets || 0;
+  document.getElementById('sys-crypto').textContent = d.crypto_markets || 0;
+  const ws = d.ws_status || {};
+  const clobEl = document.getElementById('sys-clob');
+  clobEl.textContent = ws.clob_connected ? (ws.clob_tokens || 0) + ' tokens' : 'OFFLINE';
+  clobEl.style.color = ws.clob_connected ? 'var(--green)' : 'var(--red)';
+  const binanceEl = document.getElementById('sys-binance');
+  binanceEl.textContent = ws.binance_connected ? 'CONNECTED' : 'OFFLINE';
+  binanceEl.style.color = ws.binance_connected ? 'var(--green)' : 'var(--red)';
+  if (d.btc_price) {
+    const move = d.btc_move || 0;
+    document.getElementById('sys-btc').textContent = '$' + fmt(d.btc_price, 0) + ' (' + pnlSign(move) + fmt(move*100, 2) + '%)';
+  }
+  // Last signal
+  const lastSig = d.last_signal_at;
+  document.getElementById('sys-last-signal').textContent = timeAgo(lastSig);
+  document.getElementById('sys-last-signal').style.color = !lastSig ? 'var(--muted)' : (Date.now()/1000 - lastSig > 600 ? 'var(--orange)' : 'var(--green)');
+  // Last trade
+  const lastTrade = d.last_trade_at;
+  document.getElementById('sys-last-trade').textContent = timeAgo(lastTrade);
+  document.getElementById('sys-last-trade').style.color = !lastTrade ? 'var(--muted)' : (Date.now()/1000 - lastTrade > 3600 ? 'var(--orange)' : 'var(--green)');
+  document.getElementById('sys-uptime').textContent = fmtUptime(d.uptime_sec || 0);
+  // Market distribution
+  renderMarketDist(d);
 }
 
 async function refresh() {

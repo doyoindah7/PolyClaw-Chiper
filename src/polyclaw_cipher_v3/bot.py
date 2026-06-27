@@ -113,6 +113,8 @@ class PolyClawCipherV3:
         self._markets: list[Market] = []
         self._last_scan: float = 0.0
         self._signals_this_cycle: int = 0
+        self._last_signal_at: dict[str, float] = {}  # Track last signal time per strategy
+        self._loop_stats = {"markets_eval": 0, "signals_gen": 0, "strategy_cycles": {}}  # Debug stats
         self._start_time: float = 0.0
         self._stats_cache: dict[str, Any] = {}
         # v3.4.0 FIX (BUG-C1): Position lock prevents race conditions
@@ -125,6 +127,7 @@ class PolyClawCipherV3:
     async def run(self) -> None:
         self._running = True
         self._start_time = time.time()
+        self._last_summary_log: float = 0.0
         logger.info("=== PolyClaw-Cipher v3 starting ===", extra={"event": "startup", "component": "bot"})
         logger.info("Strategies: %s", [s.name for s in self.strategies])
 
@@ -234,12 +237,29 @@ class PolyClawCipherV3:
         # Update position current values
         await self._update_position_values()
 
-        # Run strategies
+        # Run strategies on ALL markets (every loop cycle = 1s)
         self._signals_this_cycle = 0
+        strat_signal_counts = {s.name: 0 for s in self.strategies}
+        
+        markets_tried = 0
         for market in self._markets:
             if not self._running:
                 break
+            markets_tried += 1
+            # v3.5.1: Track per-strategy signal counts
+            before = self._signals_this_cycle
             await self._try_strategies(market)
+            for strat in self.strategies:
+                strat_signal_counts[strat.name] += (self._signals_this_cycle - before)
+        
+        # v3.5.1: Log strategy evaluation summary (every ~30s to avoid spam)
+        if self._signals_this_cycle > 0 or (time.time() - (self._last_summary_log or 0)) > 30:
+            self._last_summary_log = time.time()
+            logger.info(
+                "Strategy eval cycle: %d markets, %d signals | %s",
+                markets_tried, self._signals_this_cycle,
+                ", ".join(f"{k}={v}" for k, v in strat_signal_counts.items())
+            )
 
         await asyncio.sleep(loop_interval)
 
@@ -276,7 +296,15 @@ class PolyClawCipherV3:
                 signal = await strat.evaluate(market, context)
                 if signal:
                     self._signals_this_cycle += 1
+                    # Track last signal time per strategy
+                    self._last_signal_at[strat.name] = time.time()
                     await self._execute_signal(signal, market, strat)
+                    logger.info(
+                        "SIGNAL GENERATED: %s %s @ %.4f size=$%.2f conf=%.2f for %s",
+                        strat.name, signal.side.value, signal.suggested_price,
+                        signal.suggested_size_usd, signal.confidence,
+                        market.question[:50]
+                    )
             except Exception as e:
                 logger.warning("Strategy %s error on %s: %s", strat.name, market.condition_id[:8], e)
 
@@ -503,9 +531,12 @@ class PolyClawCipherV3:
         """
         snap = self.wallet.snapshot()
         snap["mode"] = self.config.get("bot", {}).get("mode", "paper")
+        from collections import Counter
+        cat_counts = Counter(m.classify() for m in self._markets)
         snap["markets"] = len(self._markets)
         snap["crypto_markets"] = len([m for m in self._markets if m.is_crypto_up_down])
         snap["strategies"] = [s.stats() for s in self.strategies]
+        snap["market_categories"] = dict(cat_counts)
         snap["risk"] = {**self.risk.stats, "config": self.risk.config}
         snap["btc_price"] = self.binance_feed.get_price("BTC")
         snap["btc_move"] = round(self.binance_feed.get_pct_move("BTC", 60), 4)
@@ -576,6 +607,17 @@ class PolyClawCipherV3:
                         "closed_at": t.closed_at,
                     }
                     for t in recent_trades
+                ]
+                recent_signals = await self.signal_repo.get_recent_signals(limit=20)
+                stats["recent_signals"] = [
+                    {"strategy": s.get("strategy", ""), "side": s.get("side", ""),
+                     "suggested_price": s.get("suggested_price", 0),
+                     "confidence": s.get("confidence", 0),
+                     "suggested_size_usd": s.get("suggested_size_usd", 0),
+                     "executed": bool(s.get("executed", 0)),
+                     "rejected_reason": s.get("rejected_reason", ""),
+                     "timestamp": s.get("timestamp", 0)}
+                    for s in recent_signals
                 ]
                 trade_stats = await self.trade_repo.stats()
                 stats["trades"] = trade_stats["total_trades"]
