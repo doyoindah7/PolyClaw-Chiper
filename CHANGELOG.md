@@ -5,6 +5,44 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.4.2] — 2026-06-27 (Production Hardening)
+
+### ✨ Added
+- **Comprehensive test suite** (`tests/test_bot_logic.py`): Unit tests covering `Wallet` cash reservation and debit safety guards, `RiskManager` correlation exposure checking, and `LatencyArbStrategy` log-normal CDF calculations.
+- **Config validation with Pydantic Settings** (`src/polyclaw_cipher_v3/config.py`): Implemented schemas ensuring strict type, range, and layout checking of all configurations upon startup.
+- **Dashboard Basic Authentication** (`src/polyclaw_cipher_v3/core/http_server.py`): Protected dashboard routes (`/`, `/api/stats`, `/api/config`, `/metrics`) under Basic HTTP authentication with custom credentials support. Bypasses auth for local requests from localhost/daemon to prevent loop issues.
+- **Graceful Shutdown in Auto-Healing Daemon** (`scripts/daemon.py`): Modified daemon shutdown behavior to prioritize graceful termination (`SIGTERM`) over immediate forced kills (`SIGKILL`), allowing database WAL checkpoints and connection closeups to complete cleanly.
+- **Real Prometheus Metrics Integration** (`src/polyclaw_cipher_v3/core/http_server.py`): Integrated `prometheus_client` to expose actual real-time Gauges (bankroll, cash, net PnL, open positions, closed trades, win rate, asset price, uptime) on `/metrics`.
+
+---
+
+## [3.4.1] — 2026-06-27 (Phase 2 Strategy & Risk Improvements)
+
+### ✨ Added
+- **Dynamic asset volatility estimation** (`src/polyclaw_cipher_v3/core/binance_ws.py`): `BinanceFeed` now tracks tick history and dynamically calculates rolling standard deviation of log returns to produce daily volatility.
+- **Time-weighted CDF Model** (`src/polyclaw_cipher_v3/strategy/latency_arb.py`): Replaced naive linear probability model with a log-normal cumulative distribution function (CDF) scaling volatility over remaining seconds-to-expiry.
+- **Correlation-Aware Exposure Limits** (`src/polyclaw_cipher_v3/risk/manager.py`): Added directional net exposure calculation ($YES - $NO) per cryptocurrency asset (BTC/ETH/SOL). Limit configured as `max_net_exposure_per_asset_pct` (50% of bankroll). Fully-hedged atomic arbs are automatically ignored.
+- **Cash Reservation Pipeline** (`src/polyclaw_cipher_v3/state/wallet.py` & `bot.py`): Implemented stateful `_reserved_cash` to block and lock notional sizes during async trade execution steps. Strategies evaluate using `available_cash` to prevent over-allocation races.
+- **Startup State Restoration** (`src/polyclaw_cipher_v3/bot.py`): Restores in-memory position metrics (`_entry_prices` and `_entry_times`) from active SQLite database rows on daemon startup, preventing hanging exit checks.
+
+### 🗑️ Removed
+- **Unused EventBus Overhead** (`src/polyclaw_cipher_v3/bot.py` & feeds): Stopped initialization of unused EventBus in the bot. Feeds now support optional event broadcasting to skip queue allocations when no subscribers exist.
+
+---
+
+## [3.4.0] — 2026-06-27 (Phase 1 Critical Bug Fixes)
+
+### 🐛 Fixed
+- **Double-Close Race Condition** (`src/polyclaw_cipher_v3/bot.py`): Added `asyncio.Lock` block and optimistic exists check inside `_close_position` to prevent concurrent resolution/TP/SL exits from double-crediting positions.
+- **Negative Cash/Wallet Overdrafts** (`src/polyclaw_cipher_v3/state/wallet.py`): Introduced `InsufficientFundsError` guard in `Wallet.debit()` to prevent cash balances from dropping below $0 under concurrent orders. Added matching rollback handlers in `bot.py`.
+- **Latency-Arb O(N²) Database bottleneck** (`src/polyclaw_cipher_v3/bot.py`): Implemented stateful open positions cache (`self._cached_open_positions`), refreshed on loops and trade executions, eliminating repetitive sqlite queries.
+- **Stale Fallback Category** (`src/polyclaw_cipher_v3/strategy/momentum.py`): Fixed fallback allowed categories default from stale v3.2 `sports_derivative` to v3.3 `sports_total`.
+- **Resolution Snipe Price Lag** (`src/polyclaw_cipher_v3/strategy/resolution_snipe.py`): Injected `CLOBFeed` WS subscriber so resolution snipping uses real-time ~50ms lag orderbook prices instead of stale 60-second Gamma API snapshots.
+- **Binance WS tick status spam** (`src/polyclaw_cipher_v3/core/binance_ws.py`): Removed high-frequency `ws_status` event publish (5-20x/second) on every Binance tick.
+- **Database Non-Atomic Commit** (`src/polyclaw_cipher_v3/state/db.py`): Added `execute_batch` and transaction commits to SQLite WAL database, ensuring multi-step position write operations are atomic.
+
+---
+
 ## [3.3.1] — 2026-06-27 (Hotfix: atomic_arb category filter + sizer deadlock)
 
 Two bugs caught by **autoclaw** (AI agent review of v3.3.0 deployment).

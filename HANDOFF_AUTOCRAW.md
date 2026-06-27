@@ -5,27 +5,49 @@
 >
 > Dibuat oleh: Z.ai Code (sesi 2026-06-27)
 > Target pembaca: autoclaw agent
-> Status v3 saat handoff: **v3.3.1 — autoclaw hotfix (atomic_arb filter + sizer deadlock)**
+> Status v3 saat handoff: **v3.4.2 — Production Hardening & Strategy Upgrade**
 
 ---
 
-## 1. Status Saat Ini (Snapshot v3.3.1)
+## 1. Status Saat Ini (Snapshot v3.4.2)
 
 ### ✅ Yang sudah jalan
-- **Bot v3.3.1** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
+- **Bot v3.4.2** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
 - **4 strategi aktif:** `latency_arb`, `atomic_arb`, `resolution_snipe`, `momentum`
 - **WebSocket feeds:** Binance (BTC/ETH/SOL) + Polymarket CLOB (34 tokens, real-time)
-- **Dashboard v3-only** di http://3.107.53.103:8082/ (public, auto-refresh 5s, title "v3.3.1")
+- **Dashboard v3-only** di http://3.107.53.103:8082/ (protected by HTTP Basic Auth)
 - **SQLite WAL** state, async paper executor, risk manager dengan per-strategy budget
-- **Daemon v3.3.0** dengan exponential backoff + deep health check (24/7 reliable)
+- **Daemon v3.4.2** dengan exponential backoff + deep health check + graceful shutdown (SIGTERM)
 - **Wallet invariant check** — bankroll == cash + invested, verified every 3s
-- **v2 STOPPED + cleaned** — source code archived di `archive/v2-legacy/` di repo
+- **Prometheus Metrics endpoint** `/metrics` dengan real-time Gauges (bankroll, cash, open positions, win rate, uptime, dll)
+- **Test suite** dengan pytest (`tests/test_bot_logic.py`) lulus 100%
+- **Pydantic Settings** config validation pada startup
 - **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
 
+### 🆕 Baru di v3.4.2 (Production Hardening)
+- **Comprehensive test suite** (`tests/test_bot_logic.py`): Unit tests untuk `Wallet`, `RiskManager` exposure limit, dan `LatencyArbStrategy` CDF log-normal.
+- **Config validation with Pydantic Settings** (`config.py`): Mencegah bot start dengan config invalid.
+- **Dashboard Basic Authentication** (`http_server.py`): Proteksi dashboard dengan password configurable di `default.yaml`. Bypasses localhost agar daemon check tetap jalan.
+- **Daemon Graceful Shutdown** (`daemon.py`): Mengirim `SIGTERM` ke bot untuk close connection & WAL checkpoint secara rapi sebelum hard kill `SIGKILL`.
+- **Prometheus Metrics** (`http_server.py`): `/metrics` endpoint menyajikan data live bot untuk dashboard Grafana.
+
+### 🆕 Baru di v3.4.1 (Phase 2 Strategy & Risk Improvements)
+- **Time-weighted CDF Model** (`latency_arb.py`): Mengganti naive linear probability dengan log-normal CDF probabilistik standar berbasis volatilitas aset.
+- **Dynamic Volatility Tracking** (`binance_ws.py`): `BinanceFeed` menghitung standard deviasi log returns dari tick history untuk dynamic daily volatility.
+- **Correlation-Aware Exposure Limits** (`risk/manager.py`): Batas exposure net directional ($YES - $NO) per asset (50% bankroll) untuk mencegah krisis modal terkorelasi.
+- **Cash Reservation Pipeline** (`wallet.py` & `bot.py`): Lock cash saat trade async berjalan agar sizer strategi lain melihat sisa cash aktual, mencegah race condition balance.
+- **Startup State Restoration** (`bot.py`): `_entry_prices` & `_entry_times` di-load dari DB saat startup agar TP/SL checks jalan normal setelah crash/restart.
+- **EventBus Cleanup**: Mengurangi overhead event publish kosong saat zero subscribers.
+
+### 🆕 Baru di v3.4.0 (Phase 1 Critical Bug Fixes)
+- **Double-Close Race Lock** (`bot.py`): `asyncio.Lock` di `_close_position` mencegah double fill/exits.
+- **Overdraft Wallet Guard** (`wallet.py`): `InsufficientFundsError` melempar error dan rollback jika cash balance minus.
+- **O(N²) Database Cache** (`bot.py`): Cache open positions dalam loop tick untuk menghentikan query berlebihan ke disk sqlite.
+- **Resolution Snipe Price Sync** (`resolution_snipe.py`): Integrasi CLOB WS feed untuk real-time price feed sniper (menghilangkan lag 60s dari API).
+- **Binance WS Spam reduction** (`binance_ws.py`): Menghapus per-tick publish event ws_status.
+- **Batch DB Transaction** (`db.py`): Transaksi DELETE + trade INSERT + wallet UPDATE berjalan atomic.
+
 ### 🆕 Baru di v3.3.1 (autoclaw hotfix)
-- **atomic_arb category filter** — was missing, traded sports_spread (random outcome)
-- **Sizer deadlock fix** — dynamic buffer blocked all trades when over-deployed;
-  emergency mode allows 50% of available cash for reduced trading
 
 ### 🆕 Baru di v3.3.0 (multi-AI review consensus)
 
@@ -73,8 +95,6 @@ discussion. See `SUMMARY_V3_REVIEW_DISCUSSION.md` for full review history.
 - **`news_llm` strategy** — interface siap, butuh z-ai-web-dev-sdk + API key
 - **`resolution_snipe` LLM mode** — sekarang threshold-only + category filter, LLM hook ready
 - **Telegram alerts** — stub di `alerts/__init__.py`
-- **Prometheus metrics** — endpoint `/metrics` ada tapi kosong
-- **Tests** — belum ada (pytest infrastructure ready di pyproject.toml)
 
 ### ⏸️ Pending (consensus deferred — for autoclaw)
 
@@ -94,12 +114,8 @@ discussion. See `SUMMARY_V3_REVIEW_DISCUSSION.md` for full review history.
 - **Sample size milestone**: 30-50 UNIQUE markets per strategy (not total trades)
   - Claude's insight: 20 trades in 1 market = 1 sample (clustered), not 20 independent
   - Track `unique_markets_traded` per strategy in stats
-- **Tests + backtesting** — infrastructure ready, not implemented
-  - Lisa + Claude + Grok all agree: RED FLAG for live trading
-  - Need: unit tests for strategies, integration tests for execution, regression tests
 
 **Lower priority:**
-- Prometheus metrics implementation
 - Cache trade stats in memory (reduce DB queries)
 - Periodic resolution check (every 10-15s for markets <1h to close)
 
