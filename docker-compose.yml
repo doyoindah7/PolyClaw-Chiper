@@ -1,0 +1,27 @@
+services:
+  polyclaw-cipher-v3:
+    build: .
+    container_name: polyclaw-cipher-v3
+    restart: unless-stopped
+    ports:
+      # PUBLIC ACCESS — like v2 (port 8080)
+      # Dashboard v3: http://3.107.53.103:8082/
+      # Dashboard v2: http://3.107.53.103:8080/ (unchanged)
+      - "8082:8082"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    environment:
+      - BOT_MODE=paper
+      - INITIAL_BANKROLL_USD=25.00
+      - HTTP_HOST=0.0.0.0
+      - HTTP_PORT=8082
+      - LOG_FORMAT=json
+    env_file:
+      - .env
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 1g
+    cpus: 1.0
+    network_mode: bridge

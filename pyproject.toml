@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polyclaw-cipher-v3"
+version = "3.1.0"
+description = "HFT-capable Polymarket bot with AI agent — aggressive compounding for small capital"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=12.0",
+    "aiosqlite>=0.20",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "structlog>=24.0",
+    "prometheus-client>=0.20",
+    "feedparser>=6.0",
+    "sortedcontainers>=2.4",
+]
+
+[project.optional-dependencies]
+llm = [
+    # z-ai-web-dev-sdk will be installed when API key is available
+    # See HANDOFF_AUTOCRAW.md for setup instructions
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+polyclaw-cipher-v3 = "polyclaw_cipher_v3.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

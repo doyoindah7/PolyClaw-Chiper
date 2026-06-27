@@ -1,0 +1,6 @@
+# Paper trading overrides (loaded on top of default.yaml when BOT_MODE=paper)
+bot:
+  mode: paper
+
+monitoring:
+  log_level: INFO

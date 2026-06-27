@@ -1,0 +1,158 @@
+# PolyClaw-Cipher v3 — Aggressive Growth Config
+# Target: $25 → aggressive compounding via 5-strategy HFT approach
+# Optimized for: t2.small (2GB RAM) VPS, runs alongside v2
+
+bot:
+  mode: paper
+  loop_interval_sec: 1                # Main loop tick (1s — strategies event-driven)
+  scan_interval_sec: 60               # Gamma API scan (WS handles real-time)
+  max_open_positions: 10              # Total across all strategies
+
+market:
+  min_volume_24h_usd: 500
+  min_liquidity: 100
+  api_page_size: 500
+  max_pages: 3
+  # Real resolution detection (fix v2 bug)
+  # Check `closed` and `resolvedBy` fields, not just end_date
+  track_max_markets: 50               # Max markets to track in CLOB WS (memory limit)
+
+# === STRATEGY 1: LATENCY ARBITRAGE (Binance → Polymarket) ===
+# Edge: PM odds adjust 200-500ms AFTER Binance price move
+strategies:
+  latency_arb:
+    enabled: true
+    min_edge_pct: 2.0                 # Min gap Binance-implied vs PM price
+    max_position_pct: 0.25            # 25% bankroll per trade (aggressive)
+    max_positions: 3
+    take_profit_pct: 5.0
+    stop_loss_pct: 3.0
+    exit_before_close_sec: 30
+    cooldown_sec: 10
+
+  # === STRATEGY 2: ATOMIC ARBITRAGE (YES + NO < $1) ===
+  # Edge: Risk-free profit when YES ask + NO ask < $1
+  # Lowered threshold 100→40 bps (Polymarket markets efficient, real arbs are 20-50 bps)
+  atomic_arb:
+    enabled: true
+    min_profit_bps: 40                # Min 0.4% profit after fees (lowered from 100)
+    max_position_pct: 0.40            # 40% bankroll per arb (low risk)
+    max_concurrent: 5
+    scan_interval_sec: 1              # Event-driven, fast check
+
+  # === STRATEGY 3: RESOLUTION SNIPING ===
+  # Edge: Near-certain markets trade at 0.90-0.97 (lazy holders)
+  # NOTE: LLM-assisted version deferred (no API key yet). Uses threshold-only mode.
+  # Added stop-loss + take-profit (previously hold-to-resolution only = unlimited downside)
+  resolution_snipe:
+    enabled: true
+    min_odds: 0.90
+    max_odds: 0.97
+    max_hours_to_close: 24
+    # LLM disabled until API key configured
+    llm_enabled: false
+    llm_min_confidence: 0.85
+    max_position_pct: 0.15            # Conservative (modal terkunci)
+    max_concurrent: 5
+    cooldown_sec: 60
+    # TP/SL exit (NEW — previously hold to resolution only)
+    stop_loss_pct: 10.0               # Exit if odds drop -10% from entry (cut losses)
+    take_profit_pct: 15.0             # Exit if odds rise +15% (take early profit)
+
+  # === STRATEGY 4: MOMENTUM (refined v2 universal) ===
+  # Uses CLOB WS for 60x faster reaction
+  momentum:
+    enabled: true
+    lookback_short_sec: 30
+    lookback_long_sec: 120
+    min_momentum_short_pct: 1.0
+    min_momentum_long_pct: 0.5
+    take_profit_pct: 8.0
+    stop_loss_pct: 4.0
+    max_hold_sec: 300                 # 5 minutes
+    max_position_pct: 0.15
+    max_positions: 3
+    cooldown_sec: 30
+    min_entry_price: 0.05
+    max_entry_price: 0.95
+
+  # === STRATEGY 5: NEWS LLM (DEFERRED — no API key yet) ===
+  # Stub interface ready, autoclaw will activate
+  news_llm:
+    enabled: false
+    llm_model: "glm-4.5"
+    max_llm_latency_sec: 30
+    min_confidence: 0.70
+    max_position_pct: 0.10
+    max_positions: 2
+    take_profit_pct: 15.0
+    stop_loss_pct: 8.0
+    max_hold_sec: 600
+    sources:
+      nitter_instances:
+        - "https://nitter.net"
+        - "https://nitter.privacydev.net"
+      twitter_accounts:
+        - "Polymarket"
+        - "binance"
+        - "CoinDesk"
+      rss_feeds:
+        - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+        - "https://www.theblock.co/rss.xml"
+
+# === RISK MANAGEMENT — Aggressive but Protected ===
+risk:
+  initial_bankroll_usd: 25.00
+  max_daily_drawdown_pct: 50.0        # Aggressive (paper trading)
+  max_consecutive_losses_global: 8
+  max_trades_per_hour_global: 60
+  session_rotation_min: 240           # 4 hours
+
+  per_strategy:
+    latency_arb:
+      max_consecutive_losses: 5
+      max_trades_per_hour: 30
+      max_capital_pct: 0.60
+    atomic_arb:
+      max_consecutive_losses: 3       # Arb should never lose — if 3, something wrong
+      max_trades_per_hour: 50
+      max_capital_pct: 0.50
+    resolution_snipe:
+      max_consecutive_losses: 3
+      max_trades_per_hour: 20
+      max_capital_pct: 0.40
+    momentum:
+      max_consecutive_losses: 5
+      max_trades_per_hour: 40
+      max_capital_pct: 0.45
+    news_llm:
+      max_consecutive_losses: 3
+      max_trades_per_hour: 15
+      max_capital_pct: 0.20
+
+  sizer:
+    type: "aggressive_compounding"
+    cash_min_pct: 0                   # 100% deployment
+    max_pct_per_trade: 0.25
+    min_position_usd: 1.00
+
+# === EXECUTION — Paper Trading ===
+execution:
+  paper:
+    slippage_bps: 25
+    fill_probability_base: 0.85
+    fill_probability_at_bid_low: 0.95
+    fill_probability_at_bid_high: 0.65
+    queue_position_factor: 0.6
+    simulated_latency_sec: 0.2        # 200ms (NON-blocking, async)
+
+# === MONITORING ===
+monitoring:
+  log_level: INFO
+  log_format: json
+  web:
+    enabled: true
+    host: 0.0.0.0                     # PUBLIC ACCESS
+    port: 8082                        # v3 dashboard port
+  heartbeat_sec: 5
+  metrics_enabled: true               # Prometheus /metrics endpoint
