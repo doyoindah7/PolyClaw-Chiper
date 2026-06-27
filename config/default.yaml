@@ -15,7 +15,7 @@ market:
   max_pages: 3
   # Real resolution detection (fix v2 bug)
   # Check `closed` and `resolvedBy` fields, not just end_date
-  track_max_markets: 50               # Max markets to track in CLOB WS (memory limit)
+  track_max_markets: 200               # Max markets to track in CLOB WS (memory limit)
 
 # === STRATEGY 1: LATENCY ARBITRAGE (Binance → Polymarket) ===
 # Edge: PM odds adjust 200-500ms AFTER Binance price move
@@ -41,8 +41,8 @@ strategies:
     max_concurrent: 5
     scan_interval_sec: 1              # Event-driven, fast check
     # v3.3.1: Category filter — skip random-outcome markets
-    skip_random_outcome: true
-    allowed_categories: ["crypto", "sports_total", "economics", "politics", "other"]
+    skip_random_outcome: false
+    allowed_categories: ["crypto", "sports_match", "sports_total", "sports_spread", "economics", "politics", "entertainment", "other"]
 
   # === STRATEGY 3: RESOLUTION SNIPING ===
   # v3.3.0: Relaxed price band 0.90→0.88 + time 24h→72h (measurement mode)
@@ -63,8 +63,8 @@ strategies:
     stop_loss_pct: 10.0               # Exit if odds drop -10% from entry (cut losses)
     take_profit_pct: 15.0             # Exit if odds rise +15% (take early profit)
     # v3.3.0: Category filter — NO sports (tail risk). Added politics.
-    skip_random_outcome: true
-    allowed_categories: ["crypto", "economics", "politics", "other"]
+    skip_random_outcome: false
+    allowed_categories: ["crypto", "sports_match", "sports_total", "sports_spread", "economics", "politics", "entertainment", "other"]
 
   # === STRATEGY 4: MOMENTUM (refined v2 universal) ===
   # Uses CLOB WS for 60x faster reaction
@@ -83,8 +83,8 @@ strategies:
     min_entry_price: 0.30            # FIX: raised from 0.05 — skip low-prob entries
     max_entry_price: 0.95
     # v3.3.0: Category filter — sports_spread EXCLUDED (random), sports_total ALLOWED (predictable)
-    skip_random_outcome: true
-    allowed_categories: ["crypto", "sports_total", "economics", "other"]
+    skip_random_outcome: false
+    allowed_categories: ["crypto", "sports_match", "sports_total", "sports_spread", "economics", "politics", "entertainment", "other"]
 
   # === STRATEGY 5: NEWS LLM (DEFERRED — no API key yet) ===
   # Stub interface ready, autoclaw will activate
