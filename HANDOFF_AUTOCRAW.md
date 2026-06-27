@@ -5,26 +5,35 @@
 >
 > Dibuat oleh: Z.ai Code (sesi 2026-06-27)
 > Target pembaca: autoclaw agent
-> Status v3 saat handoff: **v3.4.2 — Production Hardening & Strategy Upgrade**
+> Status v3 saat handoff: **v3.4.3 — Critical resolution detection bug fixed**
 
 ---
 
-## 1. Status Saat Ini (Snapshot v3.4.2)
+## 1. Status Saat Ini (Snapshot v3.4.3)
 
 ### ✅ Yang sudah jalan
-- **Bot v3.4.2** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
+- **Bot v3.4.3** running di Docker container `polyclaw-cipher-v3` di VPS 3.107.53.103
 - **4 strategi aktif:** `latency_arb`, `atomic_arb`, `resolution_snipe`, `momentum`
 - **WebSocket feeds:** Binance (BTC/ETH/SOL) + Polymarket CLOB (34 tokens, real-time)
 - **Dashboard v3-only** di http://3.107.53.103:8082/ (protected by HTTP Basic Auth)
 - **SQLite WAL** state, async paper executor, risk manager dengan per-strategy budget
-- **Daemon v3.4.2** dengan exponential backoff + deep health check + graceful shutdown (SIGTERM)
+- **Daemon v3.4.3** dengan exponential backoff + deep health check + graceful shutdown (SIGTERM)
 - **Wallet invariant check** — bankroll == cash + invested, verified every 3s
 - **Prometheus Metrics endpoint** `/metrics` dengan real-time Gauges (bankroll, cash, open positions, win rate, uptime, dll)
 - **Test suite** dengan pytest (`tests/test_bot_logic.py`) lulus 100%
 - **Pydantic Settings** config validation pada startup
 - **GitHub repo:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
 
-### 🆕 Baru di v3.4.2 (Production Hardening)
+### 🆕 Baru di v3.4.3 (Critical Resolution Fix)
+- **Resolved markets now detected** — 3 stacked bugs fixed:
+  1. Scanner fetches closed markets for open positions not in active scan
+  2. `fetch_market()` queries closed markets batch + filters by conditionId
+  3. `get_winning_side()` uses outcome prices (≈1.0/≈0.0) instead of resolvedBy (oracle address)
+- **6 positions resolved immediately** after deploy → $35.29 cash freed
+- **Bankroll: $47.91 → $54.17 (+116.7%)**, cash: $4.18 → $39.47
+- Bot resumed trading (cash available for new entries)
+
+### 🆕 Baru di v3.4.3 (Production Hardening)
 - **Comprehensive test suite** (`tests/test_bot_logic.py`): Unit tests untuk `Wallet`, `RiskManager` exposure limit, dan `LatencyArbStrategy` CDF log-normal.
 - **Config validation with Pydantic Settings** (`config.py`): Mencegah bot start dengan config invalid.
 - **Dashboard Basic Authentication** (`http_server.py`): Proteksi dashboard dengan password configurable di `default.yaml`. Bypasses localhost agar daemon check tetap jalan.

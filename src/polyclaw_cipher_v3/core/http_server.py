@@ -97,7 +97,7 @@ class HTTPServer:
             # Unprotected: safe to expose for docker / cluster healthchecks
             return {
                 "status": "ok",
-                "version": "3.4.2",
+                "version": "3.4.3",
                 "uptime_sec": int(time.time() - (self._start_time or time.time())),
             }
 
@@ -155,7 +155,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyClaw-Cipher v3.4.2 🔍</title>
+<title>PolyClaw-Cipher v3.4.3 🔍</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -302,7 +302,7 @@ body {
 <div class="wrap">
   <div class="hdr">
     <div>
-      <h1>🔍 PolyClaw-Cipher v3.4.2</h1>
+      <h1>🔍 PolyClaw-Cipher v3.4.3</h1>
       <div class="sub">Paper Trading · auto-refresh 5s · <span id="refresh-status" style="color:var(--green)">connecting...</span> · updated <span id="last-update">--</span></div>
     </div>
     <div style="text-align:right">

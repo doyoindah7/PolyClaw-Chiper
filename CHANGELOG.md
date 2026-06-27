@@ -5,6 +5,49 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.4.3] — 2026-06-27 (Critical: resolved markets never closed → cash locked forever)
+
+### 🐛 Fixed — CRITICAL BUG (3 stacked issues)
+
+**Symptom:** Bot appeared stuck — bankroll frozen at $47.91 for hours, 0 new signals,
+0 new trades. Cash trapped at $4.18 while $43.73 locked in 8 open positions (6 of which
+were in already-resolved markets from June 26).
+
+**Root cause:** 3 bugs stacked, preventing position resolution detection:
+
+1. **Scanner only queries `active=true`** → resolved markets (closed=true) drop out of
+   scan entirely. Bot never sees them again → positions never close.
+   - Fix: `_manage_positions()` now fetches market status from Gamma API for any open
+     position whose condition_id is NOT in the active scan results.
+
+2. **`fetch_market()` used wrong API approach** → Gamma API returns 422 for path
+   parameter (`/markets/{condition_id}`). API doesn't support `condition_id` as query
+   filter either (returns wrong market).
+   - Fix: Fetch closed markets batch (`closed=true&limit=200`), filter by `conditionId`
+     client-side.
+
+3. **`get_winning_side()` checked wrong field** → `resolvedBy` field contains
+   **oracle address** (`0x69c47De9D4...`), NOT token IDs. Code assumed it was token IDs,
+   so matching always failed → returned None → position never resolved.
+   - Fix: Use outcome prices instead (winning side ≈ 1.0, losing ≈ 0.0). Also keeps
+     resolvedBy check as fallback in case Polymarket changes format.
+
+### 📊 Impact (verified post-deploy)
+- **6 positions resolved immediately** on first scan after deploy
+- Bankroll: $47.91 → **$54.17** (+$6.26 profit from resolutions)
+- Cash: $4.18 → **$39.47** ($35.29 freed — bot can trade again!)
+- Open positions: 8 → **2** (BTC above $58k + Hormuz, still active)
+- Trades: 44 → **50** (6 new closed trades)
+- P&L: +$22.91 (+91.7%) → **+$29.17 (+116.7%)**
+- Bot resumed generating signals (cash available for new entries)
+
+### Files Changed
+- `src/polyclaw_cipher_v3/bot.py` — `_manage_positions()`: fetch missing markets from API
+- `src/polyclaw_cipher_v3/core/scanner.py` — `fetch_market()`: query closed markets batch
+- `src/polyclaw_cipher_v3/core/resolution.py` — `get_winning_side()`: price-based detection
+
+---
+
 ## [3.4.2] — 2026-06-27 (Production Hardening)
 
 ### ✨ Added
