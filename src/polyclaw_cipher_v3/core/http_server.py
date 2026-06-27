@@ -53,6 +53,7 @@ class HTTPServer:
         config: dict[str, Any] | None = None,
         get_db_stats=None,  # v3.5.7: daemon lightweight watchdog
         wal_checkpoint=None,  # v3.5.7: daemon lightweight watchdog
+        get_trades_paginated=None,  # v3.5.11: dashboard trade history
     ):
         self.host = host
         self.port = port
@@ -60,6 +61,7 @@ class HTTPServer:
         self.config = config or {}
         self.get_db_stats = get_db_stats  # async callable: (hours: int) -> dict
         self.wal_checkpoint = wal_checkpoint  # async callable: () -> None
+        self.get_trades_paginated = get_trades_paginated  # async: (page, limit) -> (trades, total)
         self._server = None
         self._task = None
         self._start_time: float = 0.0
@@ -112,6 +114,28 @@ class HTTPServer:
         @self.app.get("/api/config")
         async def config_endpoint():
             return JSONResponse(self.config)
+
+        @self.app.get("/api/trades")
+        async def trades_paginated(page: int = 1, limit: int = 20):
+            """v3.5.11: Paginated trade history for dashboard. Public (same as /api/stats).
+
+            Returns: {trades: [...], page, limit, total, total_pages}
+            """
+            if not self.get_trades_paginated:
+                return JSONResponse({"error": "trades callback not configured"}, status_code=503)
+            try:
+                trades, total = await self.get_trades_paginated(page, limit)
+                total_pages = (total + limit - 1) // limit if limit > 0 else 0
+                return JSONResponse({
+                    "trades": [t for t in trades],
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "total_pages": total_pages,
+                })
+            except Exception as e:
+                logger.error("trades endpoint error: %s", e)
+                return JSONResponse({"error": str(e)}, status_code=500)
 
         @self.app.get("/metrics")
         async def metrics():
@@ -409,6 +433,28 @@ body {
     </div>
     <div class="scroll-list" id="trades-container">
       <div class="empty">No closed trades yet</div>
+    </div>
+  </div>
+
+  <!-- Trade History (expandable + pagination) v3.5.11 -->
+  <div class="card" style="margin-bottom:14px" id="history-card">
+    <div class="card-title" style="cursor:pointer" onclick="toggleHistoryPanel()">
+      <span>📚 Trade History (full)</span>
+      <span class="badge" id="history-total">0</span>
+      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px">[click to expand]</span>
+    </div>
+    <div id="history-panel" style="display:none">
+      <div id="history-container">
+        <div class="empty">Loading...</div>
+      </div>
+      <div id="history-pagination" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-top:1px solid var(--border);font-size:0.75rem">
+        <span id="history-page-info">Page 1 of 1</span>
+        <div>
+          <button id="history-prev" onclick="historyPrevPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">← Prev</button>
+          <span style="margin:0 8px;color:var(--muted)">|</span>
+          <button id="history-next" onclick="historyNextPage()" style="background:var(--card2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.7rem">Next →</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -794,6 +840,78 @@ function renderAlerts(d) {
 function togglePanel(id) {
   const el = document.getElementById(id);
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+// v3.5.11: Trade History with pagination
+let historyPage = 1;
+let historyTotalPages = 1;
+let historyLoaded = false;
+
+async function toggleHistoryPanel() {
+  const panel = document.getElementById('history-panel');
+  const willShow = panel.style.display === 'none';
+  panel.style.display = willShow ? 'block' : 'none';
+  if (willShow && !historyLoaded) {
+    await loadHistoryPage(1);
+    historyLoaded = true;
+  }
+}
+
+async function loadHistoryPage(page) {
+  const container = document.getElementById('history-container');
+  container.innerHTML = '<div class="empty">Loading page ' + page + '...</div>';
+  try {
+    const resp = await fetch('/api/trades?page=' + page + '&limit=20');
+    const data = await resp.json();
+    historyPage = data.page || 1;
+    historyTotalPages = data.total_pages || 1;
+    document.getElementById('history-total').textContent = data.total || 0;
+    document.getElementById('history-page-info').textContent =
+      'Page ' + historyPage + ' of ' + historyTotalPages + ' (' + data.total + ' trades)';
+    document.getElementById('history-prev').disabled = (historyPage <= 1);
+    document.getElementById('history-next').disabled = (historyPage >= historyTotalPages);
+
+    if (!data.trades || data.trades.length === 0) {
+      container.innerHTML = '<div class="empty">No trades found</div>';
+      return;
+    }
+    let html = '';
+    for (const t of data.trades) {
+      const pnlClass = t.pnl_dollar > 0 ? 'pos' : (t.pnl_dollar < 0 ? 'neg' : 'neu');
+      const pnlSign = t.pnl_dollar >= 0 ? '+' : '';
+      const date = new Date(t.closed_at * 1000).toISOString().replace('T',' ').substring(0,19);
+      const pairBadge = t.is_pair ? ' <span style="color:var(--purple);font-size:0.6rem">PAIR</span>' : '';
+      html += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:0.75rem">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:start">';
+      html += '<div style="flex:1;min-width:0">';
+      html += '<div style="font-weight:600;color:var(--text)">' + (t.market_question||'').substring(0,80) + '</div>';
+      html += '<div style="color:var(--muted);font-size:0.65rem;margin-top:2px">';
+      html += '<span style="color:var(--blue)">' + t.strategy + '</span>' + pairBadge;
+      html += ' · <span style="color:var(--' + (t.side==='YES'?'green':'red') + ')">' + t.side + '</span>';
+      html += ' · ' + date + ' UTC';
+      html += ' · entry=' + t.entry_price.toFixed(4) + ' exit=' + t.exit_price.toFixed(4);
+      html += ' · $' + t.invested.toFixed(2) + ' (' + t.shares.toFixed(1) + ' sh)';
+      html += '</div>';
+      html += '<div style="color:var(--muted);font-size:0.65rem;margin-top:2px">Reason: ' + (t.reason||'') + '</div>';
+      html += '</div>';
+      html += '<div style="text-align:right;min-width:90px">';
+      html += '<div class="delta ' + pnlClass + '" style="font-size:0.9rem;font-weight:700">' + pnlSign + '$' + t.pnl_dollar.toFixed(4) + '</div>';
+      html += '<div class="delta ' + pnlClass + '" style="font-size:0.7rem">' + pnlSign + t.pnl_percent.toFixed(2) + '%</div>';
+      html += '</div>';
+      html += '</div>';
+      html += '</div>';
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+  }
+}
+
+async function historyPrevPage() {
+  if (historyPage > 1) await loadHistoryPage(historyPage - 1);
+}
+async function historyNextPage() {
+  if (historyPage < historyTotalPages) await loadHistoryPage(historyPage + 1);
 }
 
 function timeAgo(ts) {

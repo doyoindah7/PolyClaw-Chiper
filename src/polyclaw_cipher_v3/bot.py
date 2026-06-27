@@ -110,6 +110,7 @@ class PolyClawCipherV3:
             config=self.config,
             get_db_stats=self._get_db_stats,  # v3.5.7: daemon lightweight watchdog
             wal_checkpoint=self._trigger_wal_checkpoint,  # v3.5.7
+            get_trades_paginated=self._get_trades_paginated,  # v3.5.11: dashboard history
         )
 
         # State
@@ -384,7 +385,11 @@ class PolyClawCipherV3:
                     await self.wallet.debit(sibling.invested)
                     # Register sibling entry in strategy
                     if hasattr(strat, "register_entry"):
-                        strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
+                        # v3.5.11: Pass invested for fee-aware time exit
+                        try:
+                            strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price, sibling.invested)
+                        except TypeError:
+                            strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
                     logger.info("PAIR SIBLING: %s @ %.4f | $%.2f",
                                 sibling.side.value, sibling.entry_price, sibling.invested)
             except InsufficientFundsError as e:
@@ -401,7 +406,12 @@ class PolyClawCipherV3:
 
             # Strategy hook
             if hasattr(strat, "register_entry"):
-                strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
+                # v3.5.11: Pass invested for fee-aware time exit (momentum)
+                try:
+                    strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price, pos.invested)
+                except TypeError:
+                    # Backward compat: strategy doesn't accept invested param
+                    strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
 
             # Update bankroll + refresh cached positions
             invested = await self.position_repo.total_invested()
@@ -770,6 +780,35 @@ class PolyClawCipherV3:
         because bot handles async concurrency properly (no race with running writes).
         """
         await self.db.checkpoint()
+
+    async def _get_trades_paginated(self, page: int = 1, limit: int = 20) -> tuple[list, int]:
+        """v3.5.11: Paginated trade history for dashboard.
+
+        Returns (trades_serialized, total_count) for /api/trades endpoint.
+        """
+        trades, total = await self.trade_repo.get_trades_paginated(page, limit)
+        # Serialize to dict for JSON response
+        result = []
+        for t in trades:
+            result.append({
+                "id": t.id,
+                "market_condition_id": t.market_condition_id,
+                "market_question": t.market_question,
+                "side": t.side.value,
+                "entry_price": t.entry_price,
+                "exit_price": t.exit_price,
+                "shares": t.shares,
+                "invested": t.invested,
+                "pnl_dollar": t.pnl_dollar,
+                "pnl_percent": t.pnl_percent,
+                "strategy": t.strategy,
+                "reason": t.reason,
+                "opened_at": t.opened_at,
+                "closed_at": t.closed_at,
+                "is_pair": t.is_pair,
+                "pair_id": t.pair_id,
+            })
+        return result, total
 
     async def _get_db_stats(self, hours: int = 1) -> dict:
         """v3.5.7: Pre-computed DB aggregates for daemon watchdog.

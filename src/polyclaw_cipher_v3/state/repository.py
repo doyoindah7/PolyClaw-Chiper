@@ -85,6 +85,23 @@ class TradeRepository:
         )
         return [_row_to_trade(r) for r in rows]
 
+    async def get_trades_paginated(self, page: int = 1, limit: int = 20) -> tuple[list[Trade], int]:
+        """v3.5.11: Get trades with pagination. Returns (trades, total_count).
+
+        Used by /api/admin/trades endpoint for dashboard Trade History tab.
+        """
+        page = max(1, page)
+        limit = max(1, min(100, limit))  # cap at 100
+        offset = (page - 1) * limit
+        # Get total count first
+        total_row = await self.db.fetchone("SELECT COUNT(*) AS cnt FROM trades")
+        total = int(total_row["cnt"]) if total_row else 0
+        # Get paginated trades
+        rows = await self.db.fetchall(
+            "SELECT * FROM trades ORDER BY closed_at DESC LIMIT ? OFFSET ?", (limit, offset),
+        )
+        return [_row_to_trade(r) for r in rows], total
+
     async def get_trades_by_strategy(self, strategy: str, limit: int = 50) -> list[Trade]:
         rows = await self.db.fetchall(
             "SELECT * FROM trades WHERE strategy = ? ORDER BY closed_at DESC LIMIT ?",

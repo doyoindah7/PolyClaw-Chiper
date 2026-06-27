@@ -45,6 +45,7 @@ class MomentumStrategy(BaseStrategy):
         self._clob = clob_feed
         self._entry_prices: dict[str, float] = {}
         self._entry_times: dict[str, float] = {}
+        self._entry_invested: dict[str, float] = {}  # v3.5.11: fee-aware time exit
         # v3.5.6 debug counters
         self._dbg_no_clob = 0
         self._dbg_random_outcome = 0
@@ -222,9 +223,11 @@ class MomentumStrategy(BaseStrategy):
             "no_notional": self._dbg_no_notional,
         }
 
-    def register_entry(self, pos_id: str, condition_id: str, entry_price: float) -> None:
+    def register_entry(self, pos_id: str, condition_id: str, entry_price: float, invested: float = 0.0) -> None:
         self._entry_prices[pos_id] = entry_price
         self._entry_times[pos_id] = time.time()
+        # v3.5.11: Track invested for fee-aware time exit threshold
+        self._entry_invested[pos_id] = invested
 
     def check_exit(self, pos_id: str, condition_id: str, current_price: float) -> tuple[bool, str]:
         entry = self._entry_prices.get(pos_id)
@@ -237,9 +240,24 @@ class MomentumStrategy(BaseStrategy):
             return True, f"Momentum SL: {pnl_pct:.1f}%"
         entry_time = self._entry_times.get(pos_id, 0)
         if time.time() - entry_time > self.max_hold_sec:
-            return True, f"Momentum time exit: {pnl_pct:.1f}%"
+            # v3.5.11 FIX: Fee-aware time exit — only exit if profit >= $0.10 (covers gas fee)
+            # Live trading cost: ~$0.006 gas + ~$0.025 slippage = $0.031 per round trip
+            # Profit < $0.10 will be eaten by fees → LOSS in live trading
+            # If profit < $0.10 AND not loss, extend hold time (let TP/SL decide later)
+            invested = self._entry_invested.get(pos_id, 0.0)
+            pnl_dollar = (current_price - entry) / entry * invested if invested > 0 else 0.0
+            if pnl_dollar < 0:
+                # Loss — exit to cut losses (SL-like behavior)
+                return True, f"Momentum time exit: {pnl_pct:.1f}%"
+            if pnl_dollar >= 0.10:
+                # Profit covers fee — exit OK
+                return True, f"Momentum time exit: {pnl_pct:.1f}%"
+            # Profit < $0.10 — extend hold, let TP/SL trigger naturally
+            # This avoids exit-with-loss-after-fees scenario
+            return False, ""
         return False, ""
 
     def clear_position(self, pos_id: str, condition_id: str) -> None:
         self._entry_prices.pop(pos_id, None)
         self._entry_times.pop(pos_id, None)
+        self._entry_invested.pop(pos_id, None)  # v3.5.11
