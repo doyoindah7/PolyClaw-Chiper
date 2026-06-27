@@ -99,7 +99,7 @@ class HTTPServer:
             # Unprotected: safe to expose for docker / cluster healthchecks
             return {
                 "status": "ok",
-                "version": "3.4.4",
+                "version": "3.5.0",
                 "uptime_sec": int(time.time() - (self._start_time or time.time())),
             }
 
@@ -116,7 +116,7 @@ class HTTPServer:
                     METRICS["cash"].set(stats.get("cash", 0.0))
                     METRICS["pnl"].set(stats.get("pnl", 0.0))
                     METRICS["open_positions"].set(len(stats.get("open_positions", [])))
-                    METRICS["total_trades"].set(stats.get("trades", 0))  # v3.4.4: key is "trades" not "total_trades"
+                    METRICS["total_trades"].set(stats.get("trades", 0))  # v3.5.0: key is "trades" not "total_trades"
                     METRICS["win_rate"].set(stats.get("win_rate", 0.0))
                     METRICS["btc_price"].set(stats.get("btc_price", 0.0))
                     METRICS["uptime"].set(stats.get("uptime_sec", 0))
@@ -157,7 +157,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyClaw-Cipher v3.4.4 🔍</title>
+<title>PolyClaw-Cipher v3.5.0 🔍</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -304,7 +304,7 @@ body {
 <div class="wrap">
   <div class="hdr">
     <div>
-      <h1>🔍 PolyClaw-Cipher v3.4.4</h1>
+      <h1>🔍 PolyClaw-Cipher v3.5.0</h1>
       <div class="sub">Paper Trading · auto-refresh 5s · <span id="refresh-status" style="color:var(--green)">connecting...</span> · updated <span id="last-update">--</span></div>
     </div>
     <div style="text-align:right">
@@ -383,12 +383,15 @@ body {
     <div class="card">
       <div class="card-title"><span>⚙️ System Status</span></div>
       <div class="status-grid">
+        <div class="status-item"><div class="s-lbl">Bot Status</div><div class="s-val" id="sys-bot-status">--</div></div>
         <div class="status-item"><div class="s-lbl">Markets Tracked</div><div class="s-val" id="sys-markets">0</div></div>
         <div class="status-item"><div class="s-lbl">Crypto Up/Down</div><div class="s-val" id="sys-crypto">0</div></div>
         <div class="status-item"><div class="s-lbl">CLOB WS</div><div class="s-val" id="sys-clob">--</div></div>
         <div class="status-item"><div class="s-lbl">Binance WS</div><div class="s-val" id="sys-binance">--</div></div>
         <div class="status-item"><div class="s-lbl">BTC Price</div><div class="s-val" id="sys-btc">--</div></div>
         <div class="status-item"><div class="s-lbl">Uptime</div><div class="s-val" id="sys-uptime">--</div></div>
+        <div class="status-item"><div class="s-lbl">Last Signal</div><div class="s-val" id="sys-last-signal">--</div></div>
+        <div class="status-item"><div class="s-lbl">Last Trade</div><div class="s-val" id="sys-last-trade">--</div></div>
       </div>
     </div>
   </div>
@@ -606,6 +609,19 @@ function renderRisk(d) {
 }
 
 function renderSystem(d) {
+  // v3.5.0: Bot status with color coding
+  const statusEl = document.getElementById('sys-bot-status');
+  const status = d.bot_status || 'UNKNOWN';
+  statusEl.textContent = status;
+  const statusColors = {
+    'ACTIVE': 'var(--green)',
+    'IDLE': 'var(--gold)',
+    'STAGNANT': 'var(--red)',
+    'CASH_STUCK': 'var(--orange)',
+    'STARTING': 'var(--blue)',
+  };
+  statusEl.style.color = statusColors[status] || 'var(--muted)';
+
   document.getElementById('sys-markets').textContent = d.markets || 0;
   document.getElementById('sys-crypto').textContent = d.crypto_markets || 0;
   const ws = d.ws_status || {};
@@ -620,6 +636,24 @@ function renderSystem(d) {
     document.getElementById('sys-btc').textContent = '$' + fmt(d.btc_price, 0) + ' (' + pnlSign(move) + fmt(move, 3) + '%)';
   }
   document.getElementById('sys-uptime').textContent = fmtUptime(d.uptime_sec || 0);
+
+  // v3.5.0: Last signal/trade timestamps
+  const sigEl = document.getElementById('sys-last-signal');
+  if (d.last_signal_at) {
+    sigEl.textContent = timeAgo(d.last_signal_at);
+    const age = Date.now()/1000 - d.last_signal_at;
+    sigEl.style.color = age < 300 ? 'var(--green)' : age < 600 ? 'var(--gold)' : 'var(--red)';
+  } else {
+    sigEl.textContent = 'never';
+    sigEl.style.color = 'var(--muted)';
+  }
+  const tradeEl = document.getElementById('sys-last-trade');
+  if (d.last_trade_at) {
+    tradeEl.textContent = timeAgo(d.last_trade_at);
+  } else {
+    tradeEl.textContent = 'never';
+    tradeEl.style.color = 'var(--muted)';
+  }
 }
 
 async function refresh() {

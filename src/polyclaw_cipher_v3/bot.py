@@ -527,6 +527,11 @@ class PolyClawCipherV3:
         snap["deployed"] = 0.0
         snap["open_positions"] = []
         snap["recent_trades"] = []
+        # v3.5.0: Bot status + version (Arena.ai recommendation)
+        snap["version"] = "3.5.0"
+        snap["bot_status"] = "STARTING"
+        snap["last_signal_at"] = None
+        snap["last_trade_at"] = None
         return snap
 
     async def _refresh_stats_loop(self) -> None:
@@ -613,6 +618,32 @@ class PolyClawCipherV3:
                 stats["pnl"] = round(expected_bankroll - self.wallet.initial_bankroll, 4)
                 stats["deployed"] = round(invested, 4)
                 stats["last_stats_refresh"] = time.time()
+
+                # v3.5.0: Bot status computation (Arena.ai recommendation)
+                stats["version"] = "3.5.0"
+                disabled_strats = stats.get("risk", {}).get("disabled_strategies", [])
+                if len(disabled_strats) >= 3:
+                    stats["bot_status"] = "STAGNANT"
+                elif expected_bankroll > 30 and self.wallet.cash < 1.0 and invested > expected_bankroll * 0.9:
+                    stats["bot_status"] = "CASH_STUCK"
+                elif len(open_positions) == 0 and trade_stats["total_trades"] == 0:
+                    stats["bot_status"] = "IDLE"
+                else:
+                    stats["bot_status"] = "ACTIVE"
+
+                # v3.5.0: Last activity timestamps
+                if recent_trades:
+                    stats["last_trade_at"] = recent_trades[0].closed_at
+                else:
+                    stats["last_trade_at"] = None
+                # Last signal from any strategy
+                last_sig = 0.0
+                for s in self.strategies:
+                    for ts in s._last_signal_at.values():
+                        if ts > last_sig:
+                            last_sig = ts
+                stats["last_signal_at"] = last_sig if last_sig > 0 else None
+
                 self._stats_cache = stats
             except Exception as e:
                 logger.error("Stats refresh error: %s", e, exc_info=True)
