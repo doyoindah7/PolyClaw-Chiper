@@ -135,7 +135,7 @@ class CLOBFeed:
 
     def __init__(
         self,
-        event_bus,
+        event_bus=None,
         ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
         max_tokens_per_conn: int = 100,
     ):
@@ -299,12 +299,13 @@ class CLOBFeed:
                     "CLOB WS[%d] error: %s. Reconnect in %.1fs (attempt %d)",
                     conn_id, e, delay, self.reconnect_count,
                 )
-                await self.event_bus.publish("ws_status", {
-                    "source": f"clob_{conn_id}",
-                    "connected": False,
-                    "error": str(e),
-                    "reconnect_attempt": self.reconnect_count,
-                })
+                if self.event_bus:
+                    await self.event_bus.publish("ws_status", {
+                        "source": f"clob_{conn_id}",
+                        "connected": False,
+                        "error": str(e),
+                        "reconnect_attempt": self.reconnect_count,
+                    })
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=delay)
                     break
@@ -369,7 +370,8 @@ class CLOBFeed:
             best_ask=book.best_ask(),
             timestamp=time.time(),
         )
-        await self.event_bus.publish("clob_tick", tick)
+        if self.event_bus:
+            await self.event_bus.publish("clob_tick", tick)
 
     # --- Public API (read-only) ---
     def get_price(self, token_id: str) -> float:

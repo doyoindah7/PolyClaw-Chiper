@@ -117,6 +117,7 @@ risk:
   max_consecutive_losses_global: 8
   max_trades_per_hour_global: 60
   session_rotation_min: 240           # 4 hours
+  max_net_exposure_per_asset_pct: 50.0 # Max net exposure to any single asset (e.g. BTC) as % of bankroll
 
   per_strategy:
     latency_arb:

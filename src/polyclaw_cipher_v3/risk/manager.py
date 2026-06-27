@@ -13,6 +13,8 @@ import logging
 import time
 from typing import Any
 
+from ..core.types import Side, Signal
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +27,8 @@ class RiskManager:
         self.max_consecutive_global = c.get("max_consecutive_losses_global", 8)
         self.max_trades_per_hour_global = c.get("max_trades_per_hour_global", 60)
         self.session_rotation_min = c.get("session_rotation_min", 240)
+        # v3.4.0: Correlation exposure limit (50% default)
+        self.max_net_exposure_pct = c.get("max_net_exposure_per_asset_pct", 50.0) / 100.0
 
         # Per-strategy config
         per_strategy = c.get("per_strategy", {})
@@ -181,6 +185,59 @@ class RiskManager:
         # Reset per-strategy consecutive losses on session rotation
         self._consecutive_losses.clear()
         self._strategy_disabled.clear()
+
+    def check_exposure(self, strategy_name: str, current_bankroll: float, asset: str | None, signal: Signal, open_positions: list[Any]) -> tuple[bool, str]:
+        """v3.4.0: Check if trade doesn't breach the maximum net directional exposure limit per asset.
+
+        Correctly handles multi-leg/pair trades (e.g. atomic arb YES+NO) so hedged positions are not blocked.
+
+        Args:
+            strategy_name: Name of the strategy executing the trade.
+            current_bankroll: Current wallet bankroll.
+            asset: Cryptocurreny symbol (e.g. BTC, ETH, SOL) or None.
+            signal: Signal containing side, size, and optional legs.
+            open_positions: List of open positions.
+        """
+        if not asset:
+            return True, ""
+
+        asset = asset.upper()
+        long_exp = 0.0
+        short_exp = 0.0
+
+        for p in open_positions:
+            p_asset = getattr(p, "crypto_asset", None)
+            if p_asset and p_asset.upper() == asset:
+                if p.side.value == "YES":
+                    long_exp += p.invested
+                elif p.side.value == "NO":
+                    short_exp += p.invested
+
+        # Calculate potential new net exposure
+        if getattr(signal, "is_pair", False) and getattr(signal, "legs", None):
+            pot_long = long_exp
+            pot_short = short_exp
+            for leg in signal.legs:
+                if leg.side.value == "YES":
+                    pot_long += leg.size_usd
+                else:
+                    pot_short += leg.size_usd
+            new_net = abs(pot_long - pot_short)
+        else:
+            if signal.side.value == "YES":
+                new_long = long_exp + signal.suggested_size_usd
+                new_short = short_exp
+            else:
+                new_long = long_exp
+                new_short = short_exp + signal.suggested_size_usd
+            new_net = abs(new_long - new_short)
+
+        limit = current_bankroll * self.max_net_exposure_pct
+
+        if new_net > limit:
+            return False, f"Net {asset} exposure would be ${new_net:.2f} (limit ${limit:.2f}, max {self.max_net_exposure_pct*100:.0f}%)"
+
+        return True, ""
 
     @property
     def stats(self) -> dict[str, Any]:

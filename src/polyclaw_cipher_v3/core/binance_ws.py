@@ -62,7 +62,7 @@ class AssetFeed:
 class BinanceFeed:
     """Binance WS subscriber — emits BinanceTick to event bus."""
 
-    def __init__(self, event_bus, ws_url: str = "wss://stream.binance.com:9443"):
+    def __init__(self, event_bus=None, ws_url: str = "wss://stream.binance.com:9443"):
         self.event_bus = event_bus
         self.ws_url = ws_url
         self.feeds: dict[str, AssetFeed] = {
@@ -109,6 +109,37 @@ class BinanceFeed:
         # ticks are stored as (timestamp, price) tuples
         return [p for _, p in list(f.ticks)[-count:]]
 
+    def get_volatility_daily(self, symbol: str, lookback_ticks: int = 1800) -> float:
+        """Estimate daily volatility of symbol from ticks. Fallback if not enough data."""
+        f = self.feeds.get(symbol.upper())
+        if not f or len(f.ticks) < 10:
+            # Safe fallbacks (daily volatility: BTC: 2.5%, ETH: 3.5%, SOL: 5.0%)
+            fallbacks = {"BTC": 0.025, "ETH": 0.035, "SOL": 0.050}
+            return fallbacks.get(symbol.upper(), 0.04)
+
+        prices = [p for _, p in list(f.ticks)[-lookback_ticks:]]
+        # Calculate returns
+        import math
+        returns = []
+        for i in range(1, len(prices)):
+            if prices[i-1] > 0 and prices[i] > 0:
+                returns.append(math.log(prices[i] / prices[i-1]))
+        if len(returns) < 5:
+            fallbacks = {"BTC": 0.025, "ETH": 0.035, "SOL": 0.050}
+            return fallbacks.get(symbol.upper(), 0.04)
+
+        mean_ret = sum(returns) / len(returns)
+        variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1)
+        std_dev = math.sqrt(variance)
+
+        # Volatility scales with sqrt of time.
+        # Binance ticks arrive roughly every 1s (on trade).
+        # daily_vol = std_dev * sqrt(86400)
+        daily_vol = std_dev * math.sqrt(86400)
+
+        # Clip to sensible ranges
+        return max(0.005, min(0.20, daily_vol))
+
     async def _run(self) -> None:
         streams = "btcusdt@trade/ethusdt@trade/solusdt@trade"
         url = f"{self.ws_url}/stream?streams={streams}"
@@ -135,12 +166,13 @@ class BinanceFeed:
                 self.reconnect_count += 1
                 logger.warning("Binance WS error: %s. Reconnect in %.1fs (attempt %d)",
                                e, delay, self.reconnect_count)
-                await self.event_bus.publish("ws_status", {
-                    "source": "binance",
-                    "connected": False,
-                    "error": str(e),
-                    "reconnect_attempt": self.reconnect_count,
-                })
+                if self.event_bus:
+                    await self.event_bus.publish("ws_status", {
+                        "source": "binance",
+                        "connected": False,
+                        "error": str(e),
+                        "reconnect_attempt": self.reconnect_count,
+                    })
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=delay)
                     break
@@ -180,7 +212,8 @@ class BinanceFeed:
                         volume=volume,
                         timestamp=ts,
                     )
-                    await self.event_bus.publish("binance_tick", tick)
+                    if self.event_bus:
+                        await self.event_bus.publish("binance_tick", tick)
 
         except Exception as e:
             logger.debug("Binance parse error: %s", e)

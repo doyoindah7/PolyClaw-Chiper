@@ -60,27 +60,38 @@ class LatencyArbStrategy(BaseStrategy):
         except ValueError:
             return None, None
 
-    def _implied_prob_above(self, current_price: float, threshold: float, asset: str) -> float:
-        """Rough implied probability that asset will be ABOVE threshold at market close.
+    def _implied_prob_above(self, current_price: float, threshold: float, asset: str, seconds_to_close: float) -> float:
+        """implied probability that asset will be ABOVE threshold at market close.
 
-        Simplified model: if current_price > threshold, high probability (decays with time left).
-        If current_price < threshold, low probability.
+        Uses time-weighted log-normal CDF model scaling with dynamic asset volatility.
         """
         if current_price <= 0 or threshold <= 0:
             return 0.5
-        # Distance from threshold as % of current price
-        distance_pct = (current_price - threshold) / current_price
-        # If well above threshold (>5% above), very likely YES
-        if distance_pct > 0.05:
-            return min(0.99, 0.85 + distance_pct)
-        # If at threshold, 50/50
-        if abs(distance_pct) < 0.01:
-            return 0.50
-        # If well below threshold, unlikely YES
-        if distance_pct < -0.05:
-            return max(0.01, 0.15 + distance_pct)
-        # In-between: scale linearly
-        return 0.50 + distance_pct * 5
+
+        # 1. Get daily volatility from Binance WS feed
+        vol_daily = 0.04  # default fallback (4% daily)
+        if self._binance and hasattr(self._binance, "get_volatility_daily"):
+            vol_daily = self._binance.get_volatility_daily(asset)
+
+        # 2. Scale volatility to remaining time
+        # Express time to close in days (min 1 minute to prevent divide-by-zero/infinite vol)
+        days_to_close = max(1.0 / 1440.0, seconds_to_close / 86400.0)
+
+        from math import sqrt, log, erf
+        # Standard deviation over remaining time
+        sigma = vol_daily * sqrt(days_to_close)
+
+        # 3. Calculate probability using CDF of log-normal
+        # d = log(S/K) / sigma
+        # prob = CDF(d)
+        try:
+            d = log(current_price / threshold) / sigma
+            prob = 0.5 * (1.0 + erf(d / sqrt(2.0)))
+        except (ValueError, ZeroDivisionError):
+            prob = 0.5
+
+        # Clip to avoid extreme 0.0 or 1.0
+        return max(0.01, min(0.99, prob))
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         if not self._binance or not self._clob:
@@ -124,8 +135,8 @@ class LatencyArbStrategy(BaseStrategy):
         if sec_to_close < self.exit_before_close_sec:
             return None
 
-        # Compute implied probability from Binance
-        implied_prob = self._implied_prob_above(binance_price, threshold, asset)
+        # Compute implied probability from Binance (time-weighted CDF)
+        implied_prob = self._implied_prob_above(binance_price, threshold, asset, sec_to_close)
 
         # Edge: difference between implied and PM price
         # If implied > PM YES price → BUY YES (PM underpricing YES)

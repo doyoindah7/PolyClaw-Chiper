@@ -24,6 +24,8 @@ class Wallet:
         self.initial_bankroll = initial_bankroll
         self._bankroll: float = 0.0
         self._cash: float = 0.0
+        # v3.4.0: Cash reservation to prevent over-allocation races (STRAT-3)
+        self._reserved_cash: float = 0.0
 
     async def load(self) -> None:
         """Load wallet from DB, init if fresh."""
@@ -56,9 +58,24 @@ class Wallet:
     def cash(self) -> float:
         return self._cash
 
+    @property
+    def available_cash(self) -> float:
+        """Cash that is not reserved for pending trades."""
+        return max(0.0, self._cash - self._reserved_cash)
+
+    def reserve(self, amount: float) -> None:
+        """Reserve cash for a pending order to prevent other strategies from double-allocating it."""
+        self._reserved_cash += amount
+        logger.debug("Reserved cash: $%.2f (total reserved: $%.2f)", amount, self._reserved_cash)
+
+    def release(self, amount: float) -> None:
+        """Release reserved cash (on fill or fail/cancel)."""
+        self._reserved_cash = max(0.0, self._reserved_cash - amount)
+        logger.debug("Released cash: $%.2f (total reserved: $%.2f)", amount, self._reserved_cash)
+
     def has_funds(self, amount: float) -> bool:
-        """Check if wallet has sufficient cash for a debit. Thread-safe pre-check."""
-        return self._cash >= amount
+        """Check if wallet has sufficient AVAILABLE cash for a debit. Thread-safe pre-check."""
+        return self.available_cash >= amount
 
     async def debit(self, amount: float) -> None:
         """Reduce cash (when opening position).

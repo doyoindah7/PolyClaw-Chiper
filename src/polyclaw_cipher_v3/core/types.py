@@ -228,6 +228,18 @@ class Position(BaseModel):
     pair_id: str = ""
     pair_sibling_id: str = ""
 
+    @property
+    def crypto_asset(self) -> str | None:
+        """v3.4.0: Extract crypto asset symbol from question for correlation risk checks."""
+        q = self.market_question.upper()
+        if "BTC" in q or "BITCOIN" in q:
+            return "BTC"
+        if "ETH" in q or "ETHEREUM" in q:
+            return "ETH"
+        if "SOL" in q or "SOLANA" in q:
+            return "SOL"
+        return None
+
 
 class Trade(BaseModel):
     model_config = ConfigDict(frozen=False)

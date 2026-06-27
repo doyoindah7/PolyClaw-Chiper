@@ -24,7 +24,6 @@ from .alerts import Alerter
 from .config import load_config
 from .core.binance_ws import BinanceFeed
 from .core.clob_ws import CLOBFeed
-from .core.event_bus import EventBus
 from .core.http_server import HTTPServer
 from .core.resolution import get_winning_side, is_truly_resolved
 from .core.scanner import MarketScanner
@@ -53,7 +52,7 @@ class PolyClawCipherV3:
         )
 
         # Core infrastructure
-        self.event_bus = EventBus(queue_size=2000)
+        self.event_bus = None
         self.db = Database(self.config.get("database_url", "sqlite+aiosqlite:///data/cipher_v3.db").replace("sqlite+aiosqlite:///", ""))
         self.wallet = Wallet(self.db, self.config.get("risk", {}).get("initial_bankroll_usd", 25.0))
         self.position_repo = PositionRepository(self.db)
@@ -66,8 +65,8 @@ class PolyClawCipherV3:
             page_size=self.config.get("market", {}).get("api_page_size", 500),
             max_pages=self.config.get("market", {}).get("max_pages", 3),
         )
-        self.binance_feed = BinanceFeed(self.event_bus)
-        self.clob_feed = CLOBFeed(self.event_bus)
+        self.binance_feed = BinanceFeed()
+        self.clob_feed = CLOBFeed()
 
         # Risk + Sizer
         self.risk = RiskManager(self.config.get("risk", {}))
@@ -133,6 +132,21 @@ class PolyClawCipherV3:
         await self.db.connect()
         await self.wallet.load()
         self.risk.init(self.wallet.bankroll)
+
+        # v3.4.0 FIX (ARCH-3): Restore strategy states (entry prices/times) from open positions in DB
+        # This prevents TP/SL check_exit hanging after a bot restart or daemon recovery.
+        try:
+            open_positions = await self.position_repo.get_open_positions()
+            for pos in open_positions:
+                strat = self._find_strategy(pos.strategy)
+                if strat:
+                    if hasattr(strat, "_entry_prices"):
+                        strat._entry_prices[pos.id] = pos.entry_price
+                    if hasattr(strat, "_entry_times"):
+                        strat._entry_times[pos.id] = pos.opened_at
+            logger.info("Restored state for %d open positions to strategies", len(open_positions))
+        except Exception as e:
+            logger.error("Failed to restore strategy states from DB: %s", e)
 
         # Start services
         await self.binance_feed.start()
@@ -243,7 +257,9 @@ class PolyClawCipherV3:
             "binance_feed": self.binance_feed,
             "clob_feed": self.clob_feed,
             "bankroll": self.wallet.bankroll,
-            "cash": self.wallet.cash,
+            # v3.4.0: Pass available_cash (cash minus reserved) to prevent strategies
+            # from double-allocating cash for concurrent executions.
+            "cash": self.wallet.available_cash,
             "sizer": self.sizer,
             "strategy_cap_pct": 0.25,  # Default, overridden per-strategy below
         }
@@ -272,54 +288,79 @@ class PolyClawCipherV3:
             logger.warning("Signal blocked: %s", reason)
             return
 
-        # Execute (async, non-blocking)
-        pos = await self.executor.execute_entry(signal, market.question, self.wallet.bankroll)
-        if pos is None:
-            await self.signal_repo.log_signal(signal, executed=False, rejected_reason="fill_rejected")
-            return
-
-        # v3.4.0 FIX (BUG-C2): Handle InsufficientFundsError from wallet.debit()
-        # If concurrent signals drained cash, gracefully reject instead of crashing
-        try:
-            # Persist
-            await self.position_repo.open_position(pos)
-            await self.wallet.debit(pos.invested)
-
-            # FIX: Handle pair sibling (atomic_arb creates 2 legs)
-            sibling = self.executor.take_pair_sibling()
-            if sibling:
-                await self.position_repo.open_position(sibling)
-                await self.wallet.debit(sibling.invested)
-                # Register sibling entry in strategy
-                if hasattr(strat, "register_entry"):
-                    strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
-                logger.info("PAIR SIBLING: %s @ %.4f | $%.2f",
-                            sibling.side.value, sibling.entry_price, sibling.invested)
-        except InsufficientFundsError as e:
-            # Rollback: remove position from DB (it was already inserted)
-            logger.warning("Signal rejected (insufficient funds): %s | %s", signal.strategy_name, e)
-            await self.position_repo.close_position(pos.id)
-            await self.signal_repo.log_signal(signal, executed=False, rejected_reason=f"insufficient_funds: {e}")
-            return
-
-        await self.signal_repo.log_signal(signal, executed=True)
-        # v3.3.0: Use record_entry() for rate limit (was record_trade(strategy, 0)
-        # which double-counted rate limit on entry + close)
-        self.risk.record_entry(strat.name)
-
-        # Strategy hook
-        if hasattr(strat, "register_entry"):
-            strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
-
-        # Update bankroll + refresh cached positions
-        invested = await self.position_repo.total_invested()
-        await self.wallet.set_bankroll(self.wallet.cash + invested)
-        self._cached_open_positions = await self.position_repo.get_open_positions()
-
-        await self.alerter.notify_trade(
-            pos.side.value, pos.entry_price, pos.invested,
-            signal.confidence, market.question, pos.strategy,
+        # v3.4.0 FIX (REC-3): Correlation-aware exposure limit check
+        can_execute, reason = self.risk.check_exposure(
+            strategy_name=strat.name,
+            current_bankroll=self.wallet.bankroll,
+            asset=market.crypto_asset,
+            signal=signal,
+            open_positions=self._cached_open_positions
         )
+        if not can_execute:
+            await self.signal_repo.log_signal(signal, executed=False, rejected_reason=reason)
+            logger.warning("Signal blocked (correlation exposure limit): %s", reason)
+            return
+
+        # v3.4.0 FIX (STRAT-3): Cash reservation system to prevent over-allocation race
+        required_cash = signal.suggested_size_usd
+        if not self.wallet.has_funds(required_cash):
+            await self.signal_repo.log_signal(signal, executed=False, rejected_reason="insufficient_available_cash")
+            logger.warning("Signal blocked (insufficient available cash due to pending orders): need $%.2f", required_cash)
+            return
+
+        self.wallet.reserve(required_cash)
+
+        try:
+            # Execute (async, non-blocking)
+            pos = await self.executor.execute_entry(signal, market.question, self.wallet.bankroll)
+            if pos is None:
+                await self.signal_repo.log_signal(signal, executed=False, rejected_reason="fill_rejected")
+                return
+
+            # v3.4.0 FIX (BUG-C2): Handle InsufficientFundsError from wallet.debit()
+            # If concurrent signals drained cash, gracefully reject instead of crashing
+            try:
+                # Persist
+                await self.position_repo.open_position(pos)
+                await self.wallet.debit(pos.invested)
+
+                # FIX: Handle pair sibling (atomic_arb creates 2 legs)
+                sibling = self.executor.take_pair_sibling()
+                if sibling:
+                    await self.position_repo.open_position(sibling)
+                    await self.wallet.debit(sibling.invested)
+                    # Register sibling entry in strategy
+                    if hasattr(strat, "register_entry"):
+                        strat.register_entry(sibling.id, sibling.market_condition_id, sibling.entry_price)
+                    logger.info("PAIR SIBLING: %s @ %.4f | $%.2f",
+                                sibling.side.value, sibling.entry_price, sibling.invested)
+            except InsufficientFundsError as e:
+                # Rollback: remove position from DB (it was already inserted)
+                logger.warning("Signal rejected (insufficient funds): %s | %s", signal.strategy_name, e)
+                await self.position_repo.close_position(pos.id)
+                await self.signal_repo.log_signal(signal, executed=False, rejected_reason=f"insufficient_funds: {e}")
+                return
+
+            await self.signal_repo.log_signal(signal, executed=True)
+            # v3.3.0: Use record_entry() for rate limit (was record_trade(strategy, 0)
+            # which double-counted rate limit on entry + close)
+            self.risk.record_entry(strat.name)
+
+            # Strategy hook
+            if hasattr(strat, "register_entry"):
+                strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
+
+            # Update bankroll + refresh cached positions
+            invested = await self.position_repo.total_invested()
+            await self.wallet.set_bankroll(self.wallet.cash + invested)
+            self._cached_open_positions = await self.position_repo.get_open_positions()
+
+            await self.alerter.notify_trade(
+                pos.side.value, pos.entry_price, pos.invested,
+                signal.confidence, market.question, pos.strategy,
+            )
+        finally:
+            self.wallet.release(required_cash)
 
     async def _manage_positions(self) -> None:
         """Check open positions for resolution, TP/SL."""
