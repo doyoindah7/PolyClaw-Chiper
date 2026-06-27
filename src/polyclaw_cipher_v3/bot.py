@@ -599,7 +599,9 @@ class PolyClawCipherV3:
         snap["open_positions"] = []
         snap["recent_trades"] = []
         # v3.5.0: Bot status + version (Arena.ai recommendation)
-        snap["version"] = "3.5.0"
+        # v3.5.5: Use __version__ from package instead of hardcoded string
+        from . import __version__
+        snap["version"] = __version__
         snap["bot_status"] = "STARTING"
         snap["last_signal_at"] = None
         snap["last_trade_at"] = None
@@ -709,7 +711,9 @@ class PolyClawCipherV3:
                 stats["last_stats_refresh"] = time.time()
 
                 # v3.5.0: Bot status computation (Arena.ai recommendation)
-                stats["version"] = "3.5.0"
+                # v3.5.5: Use __version__ from package instead of hardcoded string
+                from . import __version__
+                stats["version"] = __version__
                 disabled_strats = stats.get("risk", {}).get("disabled_strategies", [])
                 if len(disabled_strats) >= 3:
                     stats["bot_status"] = "STAGNANT"
