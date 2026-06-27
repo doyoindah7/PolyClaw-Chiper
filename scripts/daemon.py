@@ -465,21 +465,21 @@ def main() -> None:
     Path("data").mkdir(exist_ok=True)
     Path("data/heartbeat.json").write_text('{"heartbeat": ' + str(time.time()) + '}')
 
-    logger.info("Daemon v3.5.7 started — bot port=%d (deep health check via %s)", port, health_host)
-    logger.info("Crash loop threshold: %d/hour → switch to %ds intervals (never give up)",
-                crash_loop_threshold, long_interval)
-    logger.info("Watchdog checks every %ds: signal_starvation, cash_deployment, resources",
-                watchdog_check_interval)
-
     # v3.3.0: Periodic deep health check interval (every 60s)
     deep_check_interval = 60
     last_deep_check = 0.0
     # v3.5.0: Stagnation detector (Arena.ai recommendation)
     stagnation_detector = StagnationDetector()
     stagnation_check_interval = 120  # Check every 2 min
-    last_stagnation_check = 0.0
     # v3.5.7: Lightweight watchdog checks (every 60s)
     watchdog_check_interval = 60
+
+    logger.info("Daemon v3.5.7 started — bot port=%d (deep health check via %s)", port, health_host)
+    logger.info("Crash loop threshold: %d/hour → switch to %ds intervals (never give up)",
+                crash_loop_threshold, long_interval)
+    logger.info("Watchdog checks every %ds: signal_starvation, cash_deployment, resources",
+                watchdog_check_interval)
+    last_stagnation_check = 0.0
     last_watchdog_check = 0.0
 
     while not _shutdown_requested:
