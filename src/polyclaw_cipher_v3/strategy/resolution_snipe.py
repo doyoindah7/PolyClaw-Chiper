@@ -38,6 +38,10 @@ class ResolutionSnipeStrategy(BaseStrategy):
         self.allowed_categories = c.get("allowed_categories", ["crypto", "economics", "other"])
         self._llm_client = None
         self._entry_prices: dict[str, float] = {}
+        # v3.3.0: Opportunity-rate tracking (Claude's suggestion)
+        self._opportunity_scan_count: int = 0  # Total markets evaluated
+        self._opportunity_qualified: int = 0   # Markets passing category + time filter
+        self._opportunity_in_band: int = 0     # Markets in price band 0.88-0.97
 
     def set_llm_client(self, llm_client) -> None:
         self._llm_client = llm_client
@@ -45,6 +49,11 @@ class ResolutionSnipeStrategy(BaseStrategy):
         logger.info("ResolutionSnipe: LLM client injected, LLM mode enabled")
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
+        # v3.3.0: Opportunity-rate logging (Claude's suggestion)
+        # Track how many markets QUALIFY per scan cycle (before threshold final)
+        # Helps determine if 30-50 sample is achievable in reasonable timeframe
+        self._opportunity_scan_count += 1
+
         # Skip closed markets
         if market.is_closed:
             return None
@@ -64,6 +73,9 @@ class ResolutionSnipeStrategy(BaseStrategy):
         hours_to_close = sec_to_close / 3600.0
         if hours_to_close > self.max_hours_to_close:
             return None
+
+        # v3.3.0: Market qualified (category + time filter passed)
+        self._opportunity_qualified += 1
 
         # Cooldown
         now = time.time()
@@ -94,6 +106,9 @@ class ResolutionSnipeStrategy(BaseStrategy):
             near_certain_side = "NO"
         else:
             return None
+
+        # v3.3.0: Market in price band (final qualifying stage)
+        self._opportunity_in_band += 1
 
         # LLM-assisted confidence check (if enabled)
         if self.llm_enabled and self._llm_client:
@@ -182,3 +197,16 @@ class ResolutionSnipeStrategy(BaseStrategy):
 
     def clear_position(self, pos_id: str, condition_id: str) -> None:
         self._entry_prices.pop(pos_id, None)
+
+    def stats(self) -> dict[str, Any]:
+        """v3.3.0: Override stats to include opportunity-rate metrics."""
+        base = super().stats()
+        base["opportunity_scanned"] = self._opportunity_scan_count
+        base["opportunity_qualified"] = self._opportunity_qualified
+        base["opportunity_in_band"] = self._opportunity_in_band
+        # Conversion rate: how many scanned markets actually qualified
+        if self._opportunity_scan_count > 0:
+            base["qualify_rate_pct"] = round(
+                self._opportunity_qualified / self._opportunity_scan_count * 100, 2
+            )
+        return base

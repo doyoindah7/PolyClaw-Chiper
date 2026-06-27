@@ -60,7 +60,7 @@ class HTTPServer:
         async def health():
             return {
                 "status": "ok",
-                "version": "3.2.0",
+                "version": "3.3.0",
                 "uptime_sec": int(time.time() - (self._start_time or time.time())),
             }
 
@@ -105,7 +105,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyClaw-Cipher v3.2.0 🔍</title>
+<title>PolyClaw-Cipher v3.3.0 🔍</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -252,7 +252,7 @@ body {
 <div class="wrap">
   <div class="hdr">
     <div>
-      <h1>🔍 PolyClaw-Cipher v3.2.0</h1>
+      <h1>🔍 PolyClaw-Cipher v3.3.0</h1>
       <div class="sub">Paper Trading · auto-refresh 5s · <span id="refresh-status" style="color:var(--green)">connecting...</span> · updated <span id="last-update">--</span></div>
     </div>
     <div style="text-align:right">

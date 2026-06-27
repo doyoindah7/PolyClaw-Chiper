@@ -186,10 +186,23 @@ class PolyClawCipherV3:
             # Track top markets in CLOB WS (max 50 for t2.small)
             track_max = self.config.get("market", {}).get("track_max_markets", 50)
             top_markets = sorted(self._markets, key=lambda m: m.volume_24h, reverse=True)[:track_max]
+            new_token_ids = set()
             for m in top_markets:
                 self.clob_feed.track(m.yes_token_id, m.condition_id, "YES")
                 self.clob_feed.track(m.no_token_id, m.condition_id, "NO")
-            # Sync WS connections with ALL tracked tokens (fixes BUG-2: only 1 token was subscribed before)
+                new_token_ids.add(m.yes_token_id)
+                new_token_ids.add(m.no_token_id)
+
+            # v3.3.0: Explicit untrack() for tokens no longer in top markets
+            # Fixes Claude's BUG-3: untrack() was 0 call sites, token list only grew
+            old_token_ids = set(self.clob_feed._tracked_tokens.keys())
+            stale_tokens = old_token_ids - new_token_ids
+            for tok in stale_tokens:
+                self.clob_feed.untrack(tok)
+            if stale_tokens:
+                logger.debug("Untracked %d stale tokens (no longer in top-%d)", len(stale_tokens), track_max)
+
+            # Sync WS connections with ALL tracked tokens (v3.3.0: only if set changed)
             await self.clob_feed.sync_connections()
 
         # Check open positions for resolution / TP/SL
@@ -272,7 +285,9 @@ class PolyClawCipherV3:
                         sibling.side.value, sibling.entry_price, sibling.invested)
 
         await self.signal_repo.log_signal(signal, executed=True)
-        self.risk.record_trade(strat.name, 0)  # Record entry (pnl=0)
+        # v3.3.0: Use record_entry() for rate limit (was record_trade(strategy, 0)
+        # which double-counted rate limit on entry + close)
+        self.risk.record_entry(strat.name)
 
         # Strategy hook
         if hasattr(strat, "register_entry"):
@@ -327,7 +342,9 @@ class PolyClawCipherV3:
         # Credit cash (invested + pnl)
         await self.wallet.credit(pos.invested + trade.pnl_dollar)
         # Record trade in risk manager
-        self.risk.record_trade(strat_name, trade.pnl_dollar)
+        # v3.3.0: Use record_close() for pnl/win-loss (was record_trade() which
+        # also incremented rate limit counter — causing double-count bug)
+        self.risk.record_close(strat_name, trade.pnl_dollar)
         # Strategy hooks
         strat = self._find_strategy(strat_name)
         if strat:

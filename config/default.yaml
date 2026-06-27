@@ -41,26 +41,26 @@ strategies:
     scan_interval_sec: 1              # Event-driven, fast check
 
   # === STRATEGY 3: RESOLUTION SNIPING ===
-  # Edge: Near-certain markets trade at 0.90-0.97 (lazy holders)
-  # NOTE: LLM-assisted version deferred (no API key yet). Uses threshold-only mode.
-  # Added stop-loss + take-profit (previously hold-to-resolution only = unlimited downside)
+  # v3.3.0: Relaxed price band 0.90→0.88 + time 24h→72h (measurement mode)
+  #         Added politics to allowed_categories. NO sports (tail risk -93% on upset).
+  #         Based on consensus Claude + Lisa + Grok: keep category filter, relax thresholds.
   resolution_snipe:
     enabled: true
-    min_odds: 0.90
+    min_odds: 0.88                    # v3.3.0: relaxed from 0.90 (more opportunities)
     max_odds: 0.97
-    max_hours_to_close: 24
+    max_hours_to_close: 72            # v3.3.0: relaxed from 24h
     # LLM disabled until API key configured
     llm_enabled: false
     llm_min_confidence: 0.85
     max_position_pct: 0.15            # Conservative (modal terkunci)
     max_concurrent: 5
     cooldown_sec: 60
-    # TP/SL exit (NEW — previously hold to resolution only)
+    # TP/SL exit
     stop_loss_pct: 10.0               # Exit if odds drop -10% from entry (cut losses)
     take_profit_pct: 15.0             # Exit if odds rise +15% (take early profit)
-    # Category filter — skip random-outcome markets (sports = upset risk)
+    # v3.3.0: Category filter — NO sports (tail risk). Added politics.
     skip_random_outcome: true
-    allowed_categories: ["crypto", "economics", "other"]
+    allowed_categories: ["crypto", "economics", "politics", "other"]
 
   # === STRATEGY 4: MOMENTUM (refined v2 universal) ===
   # Uses CLOB WS for 60x faster reaction
@@ -78,9 +78,9 @@ strategies:
     cooldown_sec: 30
     min_entry_price: 0.30            # FIX: raised from 0.05 — skip low-prob entries
     max_entry_price: 0.95
-    # Category filter — skip random-outcome markets (sports win/lose/draw)
+    # v3.3.0: Category filter — sports_spread EXCLUDED (random), sports_total ALLOWED (predictable)
     skip_random_outcome: true
-    allowed_categories: ["crypto", "sports_derivative", "economics", "other"]
+    allowed_categories: ["crypto", "sports_total", "economics", "other"]
 
   # === STRATEGY 5: NEWS LLM (DEFERRED — no API key yet) ===
   # Stub interface ready, autoclaw will activate
@@ -138,9 +138,13 @@ risk:
 
   sizer:
     type: "aggressive_compounding"
-    cash_min_pct: 10                  # Keep 10% cash buffer for new entries
-    max_pct_per_trade: 0.25
+    cash_min_pct: 15                  # v3.3.0: 10→15 (middle ground Grok 20% + Lisa dynamic)
+    max_pct_per_trade: 0.65           # v3.3.0: global ceiling (was 0.25 effective cap), now safety only
     min_position_usd: 2.00
+    # v3.3.0: Dynamic cash buffer — auto-increase reserve if deployed > 70%
+    dynamic_cash_buffer: true
+    high_deploy_threshold: 0.70       # If deployed > 70%, force cash_min_pct to high_deploy_reserve
+    high_deploy_reserve: 0.25         # Force 25% cash buffer when over-deployed
 
 # === EXECUTION — Paper Trading ===
 execution:

@@ -149,7 +149,8 @@ class CLOBFeed:
         self.connected = False
         self.reconnect_count: int = 0
         self.last_message_ts: float = 0.0
-        self._last_synced_token_count: int = 0  # Track for sync_connections() optimization
+        # v3.3.0: Track SET of token IDs (not just count) for sync_connections()
+        self._last_synced_token_ids: set[str] = set()
 
     async def start(self) -> None:
         self._stop.clear()
@@ -184,23 +185,41 @@ class CLOBFeed:
     async def sync_connections(self) -> None:
         """Spawn/restart WS connections based on current tracked tokens.
 
-        This fixes BUG-2: previously _spawn_connections() was called per-track()
-        and returned early after first connection, so only 1 token was ever subscribed.
-        Now: batch ALL tracked tokens, spawn connections with proper batching.
+        v3.3.0 fixes (Claude's BUG-3 + consensus):
+        - Compare SET of token IDs, not just count (catches token rotation)
+        - Track _last_synced_token_ids (set) instead of just count
+        - Only reconnect if token set actually changed
+        - Reduces disruption from "cancel+respawn every 60s" to "only when needed"
 
-        Call this AFTER all track() calls are done (e.g., after market scan).
+        Call this AFTER all track()/untrack() calls are done (e.g., after market scan).
         """
         token_list = list(self._tracked_tokens.keys())
         if not token_list:
+            # No tokens to track — cancel all existing connections
+            if self._tasks:
+                for task in self._tasks:
+                    task.cancel()
+                for task in self._tasks:
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                self._tasks.clear()
+                self._last_synced_token_ids = set()
             return
 
+        current_token_set = set(token_list)
+        prev_token_set = self._last_synced_token_ids if self._last_synced_token_ids else set()
+
+        # v3.3.0: Compare SET of token IDs, not just count
+        # Only reconnect if token set actually changed (rotation in top-50 by volume)
+        if current_token_set == prev_token_set and self._tasks:
+            return  # No change, keep existing connections
+
+        # Token set changed — need to reconnect
         # Calculate how many connections we need (max_tokens_per_conn per connection)
         n_conns = (len(token_list) + self.max_tokens_per_conn - 1) // self.max_tokens_per_conn
         n_conns = max(1, n_conns)
-
-        # If we already have the right number of connections AND token count hasn't changed, skip
-        if len(self._tasks) == n_conns and self._last_synced_token_count == len(token_list):
-            return
 
         # Cancel existing connections (they have stale token subscriptions)
         for task in self._tasks:
@@ -225,12 +244,14 @@ class CLOBFeed:
             )
             self._tasks.append(task)
 
-        self._last_synced_token_count = len(token_list)
+        # v3.3.0: Store set for next comparison
+        added = current_token_set - prev_token_set
+        removed = prev_token_set - current_token_set
+        self._last_synced_token_ids = current_token_set
         logger.info(
-            "CLOB WS sync: %d tokens → %d connection(s), batches: %s",
+            "CLOB WS sync: %d tokens → %d connection(s) | +%d added, -%d removed",
             len(token_list), n_conns,
-            [(idx, len(token_list[idx*self.max_tokens_per_conn:(idx+1)*self.max_tokens_per_conn]))
-             for idx in range(n_conns)],
+            len(added), len(removed),
         )
 
     async def _run_connection(self, tokens: list[str], conn_id: int) -> None:

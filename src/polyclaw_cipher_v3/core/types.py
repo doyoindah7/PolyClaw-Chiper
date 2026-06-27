@@ -18,6 +18,10 @@ class Side(str, Enum):
 
 
 # --- Market Category Classification ---
+# v3.3.0: Split sports_derivative into sports_total (O/U, predictable Poisson)
+# vs sports_spread (spread/handicap, random — 1 goal = flip outcome).
+# Based on Claude's insight: point spread is statistically closer to sports_match
+# (random outcome) than to O/U goals (Poisson-distributed, predictable).
 
 CATEGORY_PATTERNS = {
     "sports_match": [
@@ -27,12 +31,18 @@ CATEGORY_PATTERNS = {
         re.compile(r"^Will\s+[A-Z][a-z]+\s+win\b", re.IGNORECASE),
         re.compile(r"vs\.?\s+.+\s+(win|lose|draw)", re.IGNORECASE),
     ],
-    "sports_derivative": [
+    # v3.3.0: O/U goals/points = Poisson-distributed, predictable (momentum edge valid)
+    "sports_total": [
         re.compile(r"O/U\s+\d", re.IGNORECASE),
         re.compile(r"Over/Under\s+\d", re.IGNORECASE),
+        re.compile(r"total\s+(points|goals|runs)", re.IGNORECASE),
+        re.compile(r"over\s+under", re.IGNORECASE),
+    ],
+    # v3.3.0: spread/handicap = margin of victory, random (1 goal = flip) — exclude from momentum
+    "sports_spread": [
         re.compile(r"spread", re.IGNORECASE),
         re.compile(r"handicap", re.IGNORECASE),
-        re.compile(r"total\s+(points|goals|runs)", re.IGNORECASE),
+        re.compile(r"[\-+]\d+\.?\d*\s*(point|goal|run)", re.IGNORECASE),
     ],
     "politics": [
         re.compile(r"election", re.IGNORECASE),
@@ -65,9 +75,11 @@ CATEGORY_PATTERNS = {
 }
 
 # Priority order: first match wins (more specific patterns first)
+# v3.3.0: sports_total + sports_spread checked BEFORE sports_match
 CATEGORY_PRIORITY = [
-    "sports_derivative",  # Check BEFORE sports_match (O/U is derivative)
-    "sports_match",
+    "sports_total",     # O/U goals (predictable)
+    "sports_spread",    # spread/handicap (random)
+    "sports_match",     # match winner/draw
     "crypto",
     "politics",
     "economics",
@@ -148,10 +160,11 @@ class Market(BaseModel):
 
     @property
     def is_random_outcome(self) -> bool:
-        """True if market is random-outcome (sports match winner, election result, etc).
+        """True if market is random-outcome (sports match winner, spread, election result, etc).
+        v3.3.0: Added sports_spread — point spread is statistically random (1 goal = flip).
         These markets have NO momentum edge — outcome is binary random."""
         cat = self.classify()
-        return cat in ("sports_match", "entertainment")
+        return cat in ("sports_match", "sports_spread", "entertainment")
 
 
 class Leg(BaseModel):

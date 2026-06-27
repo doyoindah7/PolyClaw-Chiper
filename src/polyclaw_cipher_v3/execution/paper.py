@@ -43,16 +43,37 @@ class PaperExecutor(BaseExecutor):
 
         # Fill probability per leg
         # For pair signals, ALL legs must fill (atomic)
+        # v3.3.0: Add leg delay simulation between legs (200-500ms) + price movement
+        # to model real-world leg risk (Claude's point: Polymarket has no native
+        # multi-leg atomic order, so leg 2 price can move between leg 1 fill and leg 2 fill)
         filled_legs = []
-        for leg in signal.legs:
-            if await self._simulate_fill(leg.price):
+        for i, leg in enumerate(signal.legs):
+            # v3.3.0: For pair signals, simulate delay between legs
+            if signal.is_pair and i > 0:
+                # Random delay 200-500ms between legs (matches simulated_latency_sec range)
+                leg_delay = 0.2 + (random.random() * 0.3)  # 0.2-0.5s
+                await asyncio.sleep(leg_delay)
+                # Simulate price movement on leg 2 during delay (small random walk)
+                # Realistic: 1-3 bps movement per 200ms in liquid markets
+                price_drift_bps = random.uniform(-3, 3)  # ±3 bps
+                adjusted_price = leg.price * (1 + price_drift_bps / 10000.0)
+                adjusted_price = round(min(0.99, max(0.01, adjusted_price)), 4)
+                logger.debug(
+                    "Pair leg %d: delay=%.3fs, price drift=%+.1fbps (%.4f→%.4f)",
+                    i + 1, leg_delay, price_drift_bps, leg.price, adjusted_price,
+                )
+                fill_price_input = adjusted_price
+            else:
+                fill_price_input = leg.price
+
+            if await self._simulate_fill(fill_price_input):
                 slip = self.slippage_bps / 10000.0
-                fill_price = round(min(0.99, max(0.01, leg.price * (1 + slip))), 4)
+                fill_price = round(min(0.99, max(0.01, fill_price_input * (1 + slip))), 4)
                 filled_legs.append((leg, fill_price))
             else:
                 logger.debug(
                     "Paper fill REJECTED: %s @ %.4f | %s",
-                    leg.side.value, leg.price, market_question[:40],
+                    leg.side.value, fill_price_input, market_question[:40],
                 )
                 # For pair signals: if ANY leg fails, reject entire pair
                 self._pair_sibling = None
@@ -123,11 +144,15 @@ class PaperExecutor(BaseExecutor):
             # Link primary to sibling
             pos.pair_sibling_id = sibling_id
 
+        # v3.3.0: Tag atomic_arb PnL as paper-only (leg-risk modeled but not real)
+        # Claude's point: even with leg delay simulation, paper PnL ≠ live PnL
+        # Live has additional: network latency, order queue position, partial fills
+        pair_tag = " +PAIR (leg-risk simulated, paper-only)" if self._pair_sibling else ""
         logger.info(
             "PAPER FILL: %s %s @ %.4f | %d shares | $%.2f%s | %s",
             signal.strategy_name.upper(), primary_leg.side.value, primary_price,
             int(primary_shares), primary_invested,
-            " +PAIR" if self._pair_sibling else "",
+            pair_tag,
             market_question[:50],
         )
         return pos

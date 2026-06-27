@@ -5,6 +5,113 @@ Format: Keep a Changelog, Adheres to Semantic Versioning.
 
 ---
 
+## [3.3.0] — 2026-06-27 (Session: multi-AI review consensus — 8 fixes)
+
+Based on cross-review by 3 AI (Claude, Lisa/Qwen, Grok). All conflicts resolved via
+discussion. See `SUMMARY_V3_REVIEW_DISCUSSION.md` for full review history + consensus.
+
+### ✨ Added
+- **Market category split** (`core/types.py`):
+  - `sports_derivative` (bundled) → split into `sports_total` (O/U goals, predictable
+    Poisson) + `sports_spread` (spread/handicap, random — 1 goal = flip outcome)
+  - Based on Claude's insight: point spread is statistically closer to sports_match
+    (random) than to O/U goals (predictable)
+  - `is_random_outcome` property updated: now includes `sports_spread`
+- **Dynamic cash buffer** (`risk/sizer.py`):
+  - Auto-increase reserve from 15% → 25% if deployed > 70% of bankroll
+  - Config: `dynamic_cash_buffer: true`, `high_deploy_threshold: 0.70`, `high_deploy_reserve: 0.25`
+  - Middle ground between Lisa's 10% (too aggressive) and Grok's 25-30% (too conservative)
+- **Opportunity-rate tracking** (`strategy/resolution_snipe.py`):
+  - Track `_opportunity_scan_count` (total markets evaluated)
+  - Track `_opportunity_qualified` (passed category + time filter)
+  - Track `_opportunity_in_band` (in price band 0.88-0.97)
+  - `qualify_rate_pct` in stats() — helps determine if 30-50 sample achievable
+  - Claude's suggestion: empirical data collection vs theoretical estimates
+- **atomic_arb leg delay simulation** (`execution/paper.py`):
+  - 200-500ms delay between leg 1 and leg 2 fill
+  - Price drift simulation (±3 bps) on leg 2 during delay
+  - Models real-world leg risk (Polymarket has no native multi-leg atomic order)
+  - PnL tagged "paper-only, leg-risk simulated" in logs
+- **Explicit `untrack()` call** in bot scan cycle (`bot.py`):
+  - Compute set diff of token IDs (old vs new top-50)
+  - Call `untrack()` for tokens no longer in top markets
+  - Fixes Claude's BUG-3: `untrack()` was 0 call sites, token list only grew
+- **Multi-AI review documentation** (audit trail):
+  - `REVIEW_CLAUDE_v3.2.0.md` — Claude full review
+  - `REVIEW_LISA_v3.2.0.md` — Lisa/Qwen full review
+  - `REVIEW_GROK_v3.2.0.md` — Grok full review
+  - `REVIEW_DISCUSSION_ROUND1.md` — Round 1 Q&A
+  - `REVIEW_DISCUSSION_ROUND2_FINAL.md` — Round 2 final consensus
+  - `SUMMARY_V3_REVIEW_DISCUSSION.md` — Summary + final decisions
+
+### 🔧 Changed
+- **3-layer config conflict resolved** (`risk/sizer.py`):
+  - `risk.per_strategy.*.max_capital_pct` → PRIMARY source of truth (per-strategy cap)
+  - `strategies.*.max_position_pct` → kept as fallback only (dead code, marked)
+  - `risk.sizer.max_pct_per_trade` → raised to 0.65 (safety ceiling only, was 0.25 effective cap)
+  - Order of `min()` calls: per-strategy cap FIRST, then global ceiling
+  - Fixes Claude's BUG-1: 3 sources of truth with different values, cap effective was 25% not 40-60%
+- **`record_entry()` vs `record_close()`** (`risk/manager.py`):
+  - `record_entry(strategy)` → increment rate limit counter ONLY (no pnl tracking)
+  - `record_close(strategy, pnl)` → update pnl/win-loss/circuit breaker ONLY (no rate limit)
+  - `record_trade()` kept as deprecated alias (calls `record_close()` only)
+  - Fixes Claude's BUG-2: `record_trade(strategy, 0)` on entry + `record_trade(strategy, pnl)` on close = double-count rate limit (60 trades/hr = 30 real)
+- **`sync_connections()` set comparison** (`core/clob_ws.py`):
+  - Compare SET of token IDs, not just count
+  - Track `_last_synced_token_ids` (set) instead of `_last_synced_token_count` (int)
+  - Only reconnect if token set actually changed (catches rotation in top-50)
+  - Reduces disruption from "cancel+respawn every 60s" to "only when needed"
+  - Log: "+N added, -N removed" for visibility
+- **Cash buffer**: `cash_min_pct: 10 → 15` (middle ground consensus)
+- **atomic_arb threshold**: confirmed 40 bps (kept from v3.2.0)
+- **`max_pct_per_trade`**: 0.25 → 0.65 (now safety ceiling, was effective cap)
+- **`min_position_usd`**: 2.00 (kept from v3.2.0)
+- **resolution_snipe config**:
+  - `min_odds`: 0.90 → 0.88 (relaxed, more opportunities)
+  - `max_hours_to_close`: 24 → 72 (relaxed, near-certain markets reach 0.90+ weeks before close)
+  - `allowed_categories`: added `politics` (was crypto/economics/other only)
+  - NO sports (tail risk -93% on upset — consensus Claude + Lisa + Grok)
+- **momentum config**:
+  - `allowed_categories`: `sports_derivative` → `sports_total` (exclude sports_spread)
+  - Based on Claude's insight: point spread is random, O/U goals is predictable
+- **Config comment**: "runs alongside v2" → "v2 stopped, v3 only" (was already done v3.2.0 but re-confirmed)
+- **Version bump**: 3.2.0 → 3.3.0 in `__init__.py`, `pyproject.toml`, `http_server.py` title + health API
+
+### 🐛 Fixed
+- **Claude BUG-1 (3-layer config conflict)**: Single source of truth now per-strategy cap
+- **Claude BUG-2 (record_trade double-count)**: Split into `record_entry()` + `record_close()`
+- **Claude BUG-3 (untrack dead code)**: Explicit `untrack()` call in scan cycle + set comparison
+- **Claude factual error caught**: Aku salah claim "clob_ws.py line 154 auto-untrack on 404" — itu v2 (REST), bukan v3 (WebSocket). Fixed by implementing explicit untrack from scratch.
+- **atomic_arb leg risk**: Added delay + price drift simulation (was instant+simultan, unrealistic)
+- **Sports spread in momentum**: Excluded (was bundled with O/U goals, but statistically different)
+
+### 📊 Verified Working (post-deploy v3.3.0)
+- Container healthy, dashboard title "PolyClaw-Cipher v3.3.0"
+- Bankroll: $42.61 (from $25.00 initial = +70.4% return)
+- Cash: $27.91 (65% idle — cash buffer 15% working)
+- 2 open positions, 31 closed trades, 26 signals
+- CLOB WS: 34 tokens, no reconnect storms (set comparison working)
+- resolution_snipe opportunity tracking: 10200 scanned, 918 qualified, 1 in_band
+  (qualify_rate ~9% — empirical data now available for sample size estimation)
+- 0 errors in logs
+- Category split deployed: `sports_total` + `sports_spread` recognized
+
+### ⏸️ Still Pending (consensus deferred)
+- **MASALAH-6: 0 crypto Up/Up detection** — scanner timing issue (latency_arb still dead)
+  - Root cause identified by Claude: `_extract_threshold()` only matches "above $X",
+    but scanner matches "Up or Down — [date]" — 2 different market types conflated
+  - Fix: redesign `_implied_prob_above` for directional markets, OR change latency_arb
+    target to threshold-style markets
+- **Event bus wiring** — strategies still pull-based (1s loop), target <50ms
+  - latency_arb should subscribe to `binance_tick`
+  - momentum should subscribe to `clob_tick`
+- **LLM agent** — deferred. Test CryptoPanic latency real before commit (Lisa admit assumed)
+- **Tests + backtesting** — infrastructure ready, not implemented
+- **Sample size milestone**: 30-50 UNIQUE markets per strategy (not total trades)
+  - Claude's insight: 20 trades in 1 market = 1 sample (clustered), not 20 independent
+
+---
+
 ## [3.2.0] — 2026-06-27 (Session: market category filter + atomic_arb pair fix)
 
 ### ✨ Added

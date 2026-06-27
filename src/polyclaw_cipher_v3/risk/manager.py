@@ -114,11 +114,30 @@ class RiskManager:
         sc = self._strategy_config.get(strategy)
         return sc["max_capital_pct"] if sc else 0.25
 
-    def record_trade(self, strategy: str, pnl: float) -> None:
-        """Record trade result for risk tracking."""
+    def record_entry(self, strategy: str) -> None:
+        """v3.3.0: Record trade ENTRY for rate-limit tracking ONLY.
+
+        Fixes Claude's BUG-2: previously record_trade(strategy, 0) was called on entry,
+        which double-counted rate limit (entry + close = 2 entries in _trade_times).
+        Now: record_entry() for rate limit, record_close() for pnl/win-loss.
+
+        Args:
+            strategy: Strategy name (e.g., 'momentum', 'atomic_arb')
+        """
         now = time.time()
         self._trade_times.append(now)
         self._trade_times_per_strategy.setdefault(strategy, []).append(now)
+
+    def record_close(self, strategy: str, pnl: float) -> None:
+        """v3.3.0: Record trade CLOSE for pnl/win-loss tracking ONLY.
+
+        Does NOT touch rate limit counter (that's record_entry()'s job).
+        Updates: consecutive_losses, circuit breaker, daily pnl, wins/losses count.
+
+        Args:
+            strategy: Strategy name
+            pnl: Realized PnL in dollars (positive=win, negative=loss, 0=break-even)
+        """
         self._session_pnl += pnl
         self._total_pnl_today += pnl
         if pnl < 0:
@@ -133,6 +152,17 @@ class RiskManager:
             if self._strategy_disabled.get(strategy):
                 self._strategy_disabled[strategy] = False
                 logger.info("Strategy %s re-enabled after win", strategy)
+
+    # v3.3.0: Keep record_trade() as deprecated alias for backward compat
+    # (autoclaw or future code might still call it)
+    def record_trade(self, strategy: str, pnl: float) -> None:
+        """DEPRECATED v3.3.0: Use record_entry() + record_close() instead.
+
+        Kept for backward compatibility. Calls record_close() only (does NOT
+        double-count rate limit like before). For proper rate limiting, call
+        record_entry() when opening position.
+        """
+        self.record_close(strategy, pnl)
 
     def reset_day(self, bankroll: float) -> None:
         self._day_start = time.time()
