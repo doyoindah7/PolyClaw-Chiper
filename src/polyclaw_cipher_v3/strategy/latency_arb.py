@@ -1,12 +1,6 @@
 """Latency arbitrage — Binance price move → Polymarket odds lag.
 
-Edge: PM crypto Up/Down odds adjust 200-500ms AFTER Binance price move.
-Bot detects Binance move, buys PM YES/NO before odds adjust.
-
-v3.5.2 FIX (MASALAH-6):
-- Enhanced threshold patterns to catch more market formats
-- Added comprehensive debug logging for market evaluation tracking
-- Lowered min_edge_pct to 0.5% for more opportunities
+v3.5.3 FIX: Use market.question (correct field name)
 """
 from __future__ import annotations
 
@@ -20,15 +14,16 @@ from .base import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
-# Parse threshold from question: "Will Bitcoin be above $100,000 on June 27?"
-# v3.5.2: Enhanced patterns to catch more crypto Up/Down market formats
 THRESHOLD_PATTERN = re.compile(
     r"(?:above|over|at|reach|cross)\s+\$?([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
-# Fallback: match "BTC > $X" or "ETH > $X" format
 THRESHOLD_PATTERN_ALT = re.compile(
     r"(?:BTC|ETH|SOL|Bitcoin|Ethereum|Solana)\s*>\s*\$?([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+UP_DOWN_PATTERN = re.compile(
+    r"(up|down|higher|lower)\s*(?:or|than|vs\.?|versus)?\s*(up|down|higher|lower)?",
     re.IGNORECASE,
 )
 
@@ -39,19 +34,21 @@ class LatencyArbStrategy(BaseStrategy):
     def __init__(self, config: dict[str, Any] | None = None, binance_feed=None, clob_feed=None):
         super().__init__(config)
         c = self.config
-        # v3.5.2: Lowered from 2.0 to 0.5 for more signal opportunities
-        self.min_edge_pct = c.get("min_edge_pct", 0.5)
+        self.min_edge_pct = c.get("min_edge_pct", 0.15)
         self.max_position_pct = c.get("max_position_pct", 0.25)
         self.max_positions = c.get("max_positions", 3)
         self.take_profit_pct = c.get("take_profit_pct", 5.0)
         self.stop_loss_pct = c.get("stop_loss_pct", 3.0)
         self.exit_before_close_sec = c.get("exit_before_close_sec", 30)
         self.cooldown_sec = c.get("cooldown_sec", 10)
+        self.updown_momentum_sec = c.get("updown_momentum_sec", 60)
+        self.updown_min_move_pct = c.get("updown_min_move_pct", 0.01)
+        
         self._binance = binance_feed
         self._clob = clob_feed
         self._entry_prices: dict[str, float] = {}
         self._entry_times: dict[str, float] = {}
-        # v3.5.2: Debug counters
+        
         self._eval_count = 0
         self._skip_no_crypto = 0
         self._skip_no_threshold = 0
@@ -60,19 +57,26 @@ class LatencyArbStrategy(BaseStrategy):
         self._skip_cooldown = 0
         self._skip_max_pos = 0
         self._skip_low_edge = 0
+        self._skip_no_updown_momentum = 0
+        self._updown_signals = 0
+        self._threshold_signals = 0
+        self._updown_evaluated = 0
 
     def set_feeds(self, binance_feed, clob_feed) -> None:
         self._binance = binance_feed
         self._clob = clob_feed
 
+    def _is_up_down_market(self, question: str) -> bool:
+        return bool(UP_DOWN_PATTERN.search(question))
+
     def _extract_threshold(self, market: Market) -> tuple[str | None, float | None]:
-        """Extract (asset, threshold_price) from market question.
-        v3.5.2: Enhanced with alternative patterns."""
         if not market.crypto_asset:
             return None, None
         
-        # Try primary pattern: "above/over/at $X"
-        m = THRESHOLD_PATTERN.search(market.question)
+        # Use market.question (correct field)
+        q = market.question
+        
+        m = THRESHOLD_PATTERN.search(q)
         if m:
             try:
                 threshold = float(m.group(1).replace(",", ""))
@@ -80,8 +84,7 @@ class LatencyArbStrategy(BaseStrategy):
             except ValueError:
                 pass
         
-        # Try alternate pattern: "BTC > $X" format
-        m = THRESHOLD_PATTERN_ALT.search(market.question)
+        m = THRESHOLD_PATTERN_ALT.search(q)
         if m:
             try:
                 threshold = float(m.group(1).replace(",", ""))
@@ -92,26 +95,32 @@ class LatencyArbStrategy(BaseStrategy):
         return None, None
 
     def _implied_prob_above(self, current_price: float, threshold: float, asset: str, seconds_to_close: float) -> float:
-        """implied probability that asset will be ABOVE threshold at market close."""
         if current_price <= 0 or threshold <= 0:
             return 0.5
-
-        vol_daily = 0.04  # default fallback (4% daily)
+        vol_daily = 0.04
         if self._binance and hasattr(self._binance, "get_volatility_daily"):
             vol_daily = self._binance.get_volatility_daily(asset)
-
         days_to_close = max(1.0 / 1440.0, seconds_to_close / 86400.0)
-
         from math import sqrt, log, erf
         sigma = vol_daily * sqrt(days_to_close)
-
         try:
             d = log(current_price / threshold) / sigma
             prob = 0.5 * (1.0 + erf(d / sqrt(2.0)))
         except (ValueError, ZeroDivisionError):
             prob = 0.5
-
         return max(0.01, min(0.99, prob))
+
+    def _implied_prob_updown(self, asset: str) -> float:
+        if not self._binance:
+            return 0.5
+        pct_move = self._binance.get_pct_move_over_sec(asset, self.updown_momentum_sec)
+        if abs(pct_move) < self.updown_min_move_pct:
+            return 0.5
+        if pct_move > 0:
+            implied = 0.5 + min(0.25, abs(pct_move) * 2.5)
+        else:
+            implied = 0.5 - min(0.25, abs(pct_move) * 2.5)
+        return max(0.3, min(0.7, implied))
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         self._eval_count += 1
@@ -119,35 +128,23 @@ class LatencyArbStrategy(BaseStrategy):
         if not self._binance or not self._clob:
             return None
 
-        # Only crypto markets with threshold structure
-        asset, threshold = self._extract_threshold(market)
-        
         if not market.crypto_asset:
             self._skip_no_crypto += 1
             return None
-        
-        if not asset or not threshold:
-            self._skip_no_threshold += 1
-            # v3.5.2: Log crypto markets without threshold pattern (INFO level)
-            logger.info(
-                "LATENCY_ARB SKIP: crypto_asset=%s but NO threshold pattern in: %s",
-                market.crypto_asset, market.question[:80],
-            )
-            return None
 
-        # Get Binance price
+        asset = market.crypto_asset
         binance_price = self._binance.get_price(asset)
         if binance_price <= 0:
             self._skip_no_binance += 1
-            logger.info(
-                "LATENCY_ARB SKIP: %s Binance price=0 (asset not tracked?)",
-                asset,
-            )
             return None
 
-        # Get PM current price (from CLOB WS)
         yes_price_pm = self._clob.get_price(market.yes_token_id)
         no_price_pm = self._clob.get_price(market.no_token_id)
+        
+        # v3.5.3: Debug - log market question
+        is_updown = self._is_up_down_market(market.question)
+        has_threshold = bool(THRESHOLD_PATTERN.search(market.question) or THRESHOLD_PATTERN_ALT.search(market.question))
+        
         if yes_price_pm <= 0 and no_price_pm <= 0:
             self._skip_no_pm_price += 1
             return None
@@ -156,40 +153,65 @@ class LatencyArbStrategy(BaseStrategy):
         if no_price_pm <= 0:
             no_price_pm = market.no_price
 
-        # Cooldown
         now = time.time()
         last = self._last_signal_at.get(market.condition_id, 0.0)
         if now - last < self.cooldown_sec:
             self._skip_cooldown += 1
             return None
 
-        # Max positions
         open_positions = context.get("open_positions", [])
         my_positions = [p for p in open_positions if p.strategy == self.name]
         if len(my_positions) >= self.max_positions:
             self._skip_max_pos += 1
             return None
 
-        # Exit before close
         sec_to_close = market.seconds_to_close
         if sec_to_close < self.exit_before_close_sec:
             return None
 
-        # Compute implied probability from Binance
-        implied_prob = self._implied_prob_above(binance_price, threshold, asset, sec_to_close)
+        implied_prob = 0.5
+        edge_yes = 0.0
+        edge_no = 0.0
+        signal_type = "none"
 
-        # Edge calculation
-        edge_yes = (implied_prob - yes_price_pm) * 100  # in percentage points
-        edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
+        threshold_asset, threshold_price = self._extract_threshold(market)
+        
+        if threshold_asset and threshold_price:
+            signal_type = "threshold"
+            self._threshold_signals += 1
+            implied_prob = self._implied_prob_above(binance_price, threshold_price, asset, sec_to_close)
+            edge_yes = (implied_prob - yes_price_pm) * 100
+            edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
+            
+            logger.info(
+                "LATENCY_ARB [THRESHOLD]: %s=$%.0f threshold=$%.0f | implied=%.1f%% YES=%.3f NO=%.3f | edge=%+.2f%% | %s",
+                asset, binance_price, threshold_price, implied_prob * 100,
+                yes_price_pm, no_price_pm, max(edge_yes, edge_no),
+                market.question[:60],
+            )
+        elif is_updown:
+            signal_type = "updown"
+            self._updown_evaluated += 1
+            
+            pct_move = self._binance.get_pct_move_over_sec(asset, self.updown_momentum_sec)
+            implied_prob = self._implied_prob_updown(asset)
+            
+            edge_yes = (implied_prob - yes_price_pm) * 100
+            edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
+            
+            logger.info(
+                "LATENCY_ARB [UPDOWN]: %s=$%.0f momentum=%+.4f%% | implied=%.1f%% YES=%.3f NO=%.3f | edge=%+.2f%% | min_move=%.2f%% | %s",
+                asset, binance_price, pct_move, implied_prob * 100,
+                yes_price_pm, no_price_pm, max(edge_yes, edge_no),
+                self.updown_min_move_pct, market.question[:60],
+            )
 
-        # v3.5.2: Log ALL evaluated crypto markets at INFO level
-        logger.info(
-            "LATENCY_ARB EVAL: %s=$%.0f threshold=$%.0f | implied=%.1f%% YES=%.3f NO=%.3f | "
-            "edge_yes=%+.2f%% edge_no=%+.2f%% | min_edge=%.1f%% | %s",
-            asset, binance_price, threshold, implied_prob * 100,
-            yes_price_pm, no_price_pm, edge_yes, edge_no,
-            self.min_edge_pct, market.question[:60],
-        )
+            if abs(pct_move) < self.updown_min_move_pct:
+                self._skip_no_updown_momentum += 1
+                return None
+        else:
+            self._skip_no_threshold += 1
+            return None
 
         if edge_yes >= self.min_edge_pct and edge_yes > edge_no:
             side = Side.YES
@@ -205,24 +227,20 @@ class LatencyArbStrategy(BaseStrategy):
             self._skip_low_edge += 1
             return None
 
-        # Confidence based on edge magnitude
         confidence = min(0.95, 0.55 + edge / 10.0)
         if confidence < 0.45:
             return None
 
-        # Position size
         bankroll = context.get("bankroll", 25.0)
         cash = context.get("cash", bankroll)
         sizer = context.get("sizer")
         strategy_cap_pct = context.get("strategy_cap_pct", self.max_position_pct)
         if sizer:
             notional = sizer.size(
-                bankroll=bankroll,
-                cash=cash,
+                bankroll=bankroll, cash=cash,
                 open_positions_for_strategy=len(my_positions),
                 max_positions_for_strategy=self.max_positions,
-                confidence=confidence,
-                strategy_max_pct=strategy_cap_pct,
+                confidence=confidence, strategy_max_pct=strategy_cap_pct,
             )
         else:
             available_slots = max(1, self.max_positions - len(my_positions))
@@ -236,8 +254,8 @@ class LatencyArbStrategy(BaseStrategy):
         self.signals_emitted += 1
 
         logger.info(
-            "LATENCY ARB SIGNAL: %s %s | %s=$%s threshold=$%s | implied=%.2f%% edge=%+.2f%% | conf=%.2f $%.2f | %s",
-            asset, side.value, asset, f"{binance_price:.0f}", f"{threshold:.0f}",
+            "LATENCY ARB SIGNAL [%s]: %s %s | implied=%.2f%% edge=%+.2f%% | conf=%.2f $%.2f | %s",
+            signal_type.upper(), asset, side.value,
             implied_prob * 100, edge, confidence, notional, market.question[:50],
         )
 
@@ -247,7 +265,7 @@ class LatencyArbStrategy(BaseStrategy):
             suggested_price=entry_price,
             suggested_size_usd=notional,
             confidence=confidence,
-            reason=f"LatencyArb: {asset}=${binance_price:.0f} threshold=${threshold:.0f} implied={implied_prob*100:.1f}% edge={edge:+.2f}%",
+            reason=f"LatencyArb[{signal_type}]: {asset}=${binance_price:.0f} implied={implied_prob*100:.1f}% edge={edge:+.2f}%",
             strategy_name=self.name,
             token_id=token_id,
             timestamp=now,
@@ -273,7 +291,6 @@ class LatencyArbStrategy(BaseStrategy):
         self._entry_times.pop(pos_id, None)
 
     def get_debug_stats(self) -> dict:
-        """v3.5.2: Return debug stats for dashboard/API."""
         return {
             "evaluated": self._eval_count,
             "skip_no_crypto": self._skip_no_crypto,
@@ -283,5 +300,14 @@ class LatencyArbStrategy(BaseStrategy):
             "skip_cooldown": self._skip_cooldown,
             "skip_max_pos": self._skip_max_pos,
             "skip_low_edge": self._skip_low_edge,
+            "skip_no_updown_momentum": self._skip_no_updown_momentum,
+            "updown_evaluated": self._updown_evaluated,
+            "updown_signals": self._updown_signals,
+            "threshold_signals": self._threshold_signals,
             "signals_emitted": self.signals_emitted,
+            "config": {
+                "min_edge_pct": self.min_edge_pct,
+                "updown_momentum_sec": self.updown_momentum_sec,
+                "updown_min_move_pct": self.updown_min_move_pct,
+            }
         }
