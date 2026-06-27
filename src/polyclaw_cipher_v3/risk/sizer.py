@@ -20,7 +20,7 @@ class CompoundingSizer:
     - Dynamic cash buffer: if deployed > threshold, force higher reserve
     """
 
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(self, config: dict[str, Any] | None = None, tier_manager=None):
         c = config or {}
         self.cash_min_pct = c.get("cash_min_pct", 15)  # v3.3.0: 10→15
         self.max_pct_per_trade = c.get("max_pct_per_trade", 0.65)  # v3.3.0: ceiling only

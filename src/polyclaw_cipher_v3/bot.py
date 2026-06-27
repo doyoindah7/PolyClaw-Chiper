@@ -32,6 +32,7 @@ from .execution.paper import PaperExecutor
 from .observability.logs import setup_logging
 from .risk.manager import RiskManager
 from .risk.sizer import CompoundingSizer
+from .risk.tier_manager import TierManager
 from .state.db import Database
 from .state.repository import PositionRepository, SignalRepository, TradeRepository
 from .state.wallet import Wallet, InsufficientFundsError
@@ -70,7 +71,8 @@ class PolyClawCipherV3:
 
         # Risk + Sizer
         self.risk = RiskManager(self.config.get("risk", {}))
-        self.sizer = CompoundingSizer(self.config.get("risk", {}).get("sizer", {}))
+        self._tier_manager = TierManager(force_tier=0)
+        self.sizer = CompoundingSizer(self.config.get("risk", {}).get("sizer", {}), tier_manager=self._tier_manager)
 
         # Executor
         self.executor = PaperExecutor(self.config.get("execution", {}).get("paper", {}))
@@ -602,6 +604,7 @@ class PolyClawCipherV3:
         # v3.5.5: Use __version__ from package instead of hardcoded string
         from . import __version__
         snap["version"] = __version__
+        snap["tier"] = self._tier_manager.stats()
         snap["bot_status"] = "STARTING"
         snap["last_signal_at"] = None
         snap["last_trade_at"] = None

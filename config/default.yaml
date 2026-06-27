@@ -36,9 +36,9 @@ strategies:
   # v3.3.1: Added category filter (was missing — traded sports_spread)
   atomic_arb:
     enabled: true
-    min_profit_bps: 40                # Min 0.4% profit after fees (lowered from 100)
+    min_profit_bps: 100  # v3.5.8: 80->100 (sweet spot) — avoid break-even arb                # Min 0.4% profit after fees (lowered from 100)
     max_position_pct: 0.40            # 40% bankroll per arb (low risk)
-    max_concurrent: 5
+    max_concurrent: 8  # v3.5.8: 5->8 (risk-free, capture more)
     scan_interval_sec: 1              # Event-driven, fast check
     # v3.3.1: Category filter — skip random-outcome markets
     skip_random_outcome: false
@@ -49,7 +49,7 @@ strategies:
   #         Added politics to allowed_categories. NO sports (tail risk -93% on upset).
   #         Based on consensus Claude + Lisa + Grok: keep category filter, relax thresholds.
   resolution_snipe:
-    enabled: true
+    enabled: false  # v3.5.7: disabled — WR 12.5%, frees $50+ cash
     min_odds: 0.92                    # v3.5.5 FIX (P0-05): was 0.88 — only near-certain markets
     max_odds: 0.97
     max_hours_to_close: 24            # v3.5.5 FIX (P0-05): was 72 — only fast-resolve markets
@@ -72,15 +72,15 @@ strategies:
     enabled: true
     lookback_short_sec: 30
     lookback_long_sec: 120
-    min_momentum_short_pct: 1.0
-    min_momentum_long_pct: 0.5
+    min_momentum_short_pct: 0.5  # v3.5.6 AGGRESSIVE: 1.0->0.5
+    min_momentum_long_pct: 0.25  # v3.5.6 AGGRESSIVE: 0.5->0.25
     take_profit_pct: 8.0
     stop_loss_pct: 4.0
     max_hold_sec: 300                 # 5 minutes
     max_position_pct: 0.15
-    max_positions: 3
+    max_positions: 6  # v3.5.7: 3->6
     cooldown_sec: 30
-    min_entry_price: 0.30            # FIX: raised from 0.05 — skip low-prob entries
+    min_entry_price: 0.10   # v3.5.6 AGGRESSIVE: 0.30->0.10            # FIX: raised from 0.05 — skip low-prob entries
     max_entry_price: 0.95
     # v3.3.0: Category filter — sports_spread EXCLUDED (random), sports_total ALLOWED (predictable)
     skip_random_outcome: false
@@ -176,3 +176,9 @@ monitoring:
     password: ""
   heartbeat_sec: 5
   metrics_enabled: true               # Prometheus /metrics endpoint
+
+# v3.5.9 Tier-Based Dynamic Sizer
+tier:
+  mode: auto
+  force_tier: 0
+  cooldown_hours: 24

@@ -45,44 +45,67 @@ class MomentumStrategy(BaseStrategy):
         self._clob = clob_feed
         self._entry_prices: dict[str, float] = {}
         self._entry_times: dict[str, float] = {}
+        # v3.5.6 debug counters
+        self._dbg_no_clob = 0
+        self._dbg_random_outcome = 0
+        self._dbg_cat_filtered = 0
+        self._dbg_vol_filtered = 0
+        self._dbg_price_filtered = 0
+        self._dbg_cooldown = 0
+        self._dbg_max_pos = 0
+        self._dbg_one_per_mkt = 0
+        self._dbg_no_change = 0
+        self._dbg_low_conf = 0
+        self._dbg_no_notional = 0
+        self._dbg_evaluated = 0
+        self._dbg_signal = 0
 
     def set_clob_feed(self, clob_feed) -> None:
         self._clob = clob_feed
 
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         if not self._clob:
+            self._dbg_no_clob += 1
             return None
 
         # FIX: Category filter — skip random-outcome markets
         # Sports match winner, entertainment = no momentum edge
         if self.skip_random_outcome and market.is_random_outcome:
+            self._dbg_random_outcome += 1
             return None
         cat = market.classify()
         if self.allowed_categories and cat not in self.allowed_categories:
+            self._dbg_cat_filtered += 1
             return None
 
         # Filters
-        if market.volume_24h < 500:
+        if market.volume_24h < 100:  # v3.5.6: 500->100
+            self._dbg_vol_filtered += 1
             return None
         if market.yes_price < self.min_entry_price or market.yes_price > self.max_entry_price:
+            self._dbg_price_filtered += 1
             return None
 
         # Cooldown
         now = time.time()
         last = self._last_signal_at.get(market.condition_id, 0.0)
         if now - last < self.cooldown_sec:
+            self._dbg_cooldown += 1
             return None
 
         # Max positions
         open_positions = context.get("open_positions", [])
         my_positions = [p for p in open_positions if p.strategy == self.name]
         if len(my_positions) >= self.max_positions:
+            self._dbg_max_pos += 1
             return None
 
         # One per market
         if any(p.market_condition_id == market.condition_id for p in my_positions):
+            self._dbg_one_per_mkt += 1
             return None
 
+        self._dbg_evaluated += 1
         # CLOB data
         yes_change_short = self._clob.get_pct_change(market.yes_token_id, self.lookback_short_sec)
         no_change_short = self._clob.get_pct_change(market.no_token_id, self.lookback_short_sec)
@@ -99,8 +122,10 @@ class MomentumStrategy(BaseStrategy):
         max_change_long = max(abs(yes_change_long), abs(no_change_long))
 
         if max_change_short < self.min_momentum_short_pct:
+            self._dbg_no_change += 1
             return None
         if max_change_long < self.min_momentum_long_pct:
+            self._dbg_no_change += 1
             return None
 
         # Direction: pick side with more momentum
@@ -121,6 +146,7 @@ class MomentumStrategy(BaseStrategy):
         confidence *= trend_alignment
 
         if confidence < self.min_confidence:
+            self._dbg_low_conf += 1
             return None
 
         # Volatility check
@@ -153,8 +179,10 @@ class MomentumStrategy(BaseStrategy):
             notional = max(2.5, min(notional, cash * 0.90))
 
         if notional < 1.0:
+            self._dbg_no_notional += 1
             return None
 
+        self._dbg_signal += 1
         direction = "UP" if change > 0 else "DOWN"
         self._last_signal_at[market.condition_id] = now
         self.signals_emitted += 1
@@ -176,6 +204,23 @@ class MomentumStrategy(BaseStrategy):
             token_id=token_id,
             timestamp=now,
         )
+
+    def get_debug_stats(self) -> dict:
+        return {
+            "evaluated": self._dbg_evaluated,
+            "signals": self._dbg_signal,
+            "no_clob": self._dbg_no_clob,
+            "random_outcome": self._dbg_random_outcome,
+            "cat_filtered": self._dbg_cat_filtered,
+            "vol_filtered": self._dbg_vol_filtered,
+            "price_filtered": self._dbg_price_filtered,
+            "cooldown": self._dbg_cooldown,
+            "max_pos": self._dbg_max_pos,
+            "one_per_mkt": self._dbg_one_per_mkt,
+            "no_change": self._dbg_no_change,
+            "low_conf": self._dbg_low_conf,
+            "no_notional": self._dbg_no_notional,
+        }
 
     def register_entry(self, pos_id: str, condition_id: str, entry_price: float) -> None:
         self._entry_prices[pos_id] = entry_price
