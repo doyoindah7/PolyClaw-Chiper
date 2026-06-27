@@ -1,6 +1,6 @@
 """Latency arbitrage — Binance price move → Polymarket odds lag.
 
-v3.5.3 FIX: Use market.question (correct field name)
+v3.5.4 FIX: Use API price (market.yes_price/no_price) as fallback when CLOB not available
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class LatencyArbStrategy(BaseStrategy):
         self._skip_no_crypto = 0
         self._skip_no_threshold = 0
         self._skip_no_binance = 0
-        self._skip_no_pm_price = 0
+        self._skip_no_api_price = 0
         self._skip_cooldown = 0
         self._skip_max_pos = 0
         self._skip_low_edge = 0
@@ -73,7 +73,6 @@ class LatencyArbStrategy(BaseStrategy):
         if not market.crypto_asset:
             return None, None
         
-        # Use market.question (correct field)
         q = market.question
         
         m = THRESHOLD_PATTERN.search(q)
@@ -122,10 +121,24 @@ class LatencyArbStrategy(BaseStrategy):
             implied = 0.5 - min(0.25, abs(pct_move) * 2.5)
         return max(0.3, min(0.7, implied))
 
+    def _get_price(self, market: Market) -> tuple[float, float]:
+        """v3.5.4: Get YES/NO prices from CLOB OR fallback to API price."""
+        # Try CLOB first
+        yes_price = self._clob.get_price(market.yes_token_id) if self._clob else 0
+        no_price = self._clob.get_price(market.no_token_id) if self._clob else 0
+        
+        # Fallback to API price from scanner
+        if yes_price <= 0:
+            yes_price = market.yes_price
+        if no_price <= 0:
+            no_price = market.no_price
+            
+        return yes_price, no_price
+
     async def evaluate(self, market: Market, context: dict[str, Any]) -> Signal | None:
         self._eval_count += 1
         
-        if not self._binance or not self._clob:
+        if not self._binance:
             return None
 
         if not market.crypto_asset:
@@ -138,20 +151,15 @@ class LatencyArbStrategy(BaseStrategy):
             self._skip_no_binance += 1
             return None
 
-        yes_price_pm = self._clob.get_price(market.yes_token_id)
-        no_price_pm = self._clob.get_price(market.no_token_id)
+        # v3.5.4: Use fallback logic for price
+        yes_price, no_price = self._get_price(market)
         
-        # v3.5.3: Debug - log market question
+        if yes_price <= 0 and no_price <= 0:
+            self._skip_no_api_price += 1
+            return None
+
         is_updown = self._is_up_down_market(market.question)
         has_threshold = bool(THRESHOLD_PATTERN.search(market.question) or THRESHOLD_PATTERN_ALT.search(market.question))
-        
-        if yes_price_pm <= 0 and no_price_pm <= 0:
-            self._skip_no_pm_price += 1
-            return None
-        if yes_price_pm <= 0:
-            yes_price_pm = market.yes_price
-        if no_price_pm <= 0:
-            no_price_pm = market.no_price
 
         now = time.time()
         last = self._last_signal_at.get(market.condition_id, 0.0)
@@ -180,13 +188,13 @@ class LatencyArbStrategy(BaseStrategy):
             signal_type = "threshold"
             self._threshold_signals += 1
             implied_prob = self._implied_prob_above(binance_price, threshold_price, asset, sec_to_close)
-            edge_yes = (implied_prob - yes_price_pm) * 100
-            edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
+            edge_yes = (implied_prob - yes_price) * 100
+            edge_no = ((1.0 - implied_prob) - no_price) * 100
             
             logger.info(
                 "LATENCY_ARB [THRESHOLD]: %s=$%.0f threshold=$%.0f | implied=%.1f%% YES=%.3f NO=%.3f | edge=%+.2f%% | %s",
                 asset, binance_price, threshold_price, implied_prob * 100,
-                yes_price_pm, no_price_pm, max(edge_yes, edge_no),
+                yes_price, no_price, max(edge_yes, edge_no),
                 market.question[:60],
             )
         elif is_updown:
@@ -196,13 +204,13 @@ class LatencyArbStrategy(BaseStrategy):
             pct_move = self._binance.get_pct_move_over_sec(asset, self.updown_momentum_sec)
             implied_prob = self._implied_prob_updown(asset)
             
-            edge_yes = (implied_prob - yes_price_pm) * 100
-            edge_no = ((1.0 - implied_prob) - no_price_pm) * 100
+            edge_yes = (implied_prob - yes_price) * 100
+            edge_no = ((1.0 - implied_prob) - no_price) * 100
             
             logger.info(
-                "LATENCY_ARB [UPDOWN]: %s=$%.0f momentum=%+.4f%% | implied=%.1f%% YES=%.3f NO=%.3f | edge=%+.2f%% | min_move=%.2f%% | %s",
+                "LATENCY_ARB [UPDOWN]: %s=$%.0f momentum=%+.4f%% | implied=%.1f%% YES=%.3f NO=%.3f | edge=%+.2f%% | min_move=%.3f%% | %s",
                 asset, binance_price, pct_move, implied_prob * 100,
-                yes_price_pm, no_price_pm, max(edge_yes, edge_no),
+                yes_price, no_price, max(edge_yes, edge_no),
                 self.updown_min_move_pct, market.question[:60],
             )
 
@@ -215,12 +223,12 @@ class LatencyArbStrategy(BaseStrategy):
 
         if edge_yes >= self.min_edge_pct and edge_yes > edge_no:
             side = Side.YES
-            entry_price = yes_price_pm
+            entry_price = yes_price
             edge = edge_yes
             token_id = market.yes_token_id
         elif edge_no >= self.min_edge_pct:
             side = Side.NO
-            entry_price = no_price_pm
+            entry_price = no_price
             edge = edge_no
             token_id = market.no_token_id
         else:
@@ -296,7 +304,7 @@ class LatencyArbStrategy(BaseStrategy):
             "skip_no_crypto": self._skip_no_crypto,
             "skip_no_threshold": self._skip_no_threshold,
             "skip_no_binance": self._skip_no_binance,
-            "skip_no_pm_price": self._skip_no_pm_price,
+            "skip_no_api_price": self._skip_no_api_price,
             "skip_cooldown": self._skip_cooldown,
             "skip_max_pos": self._skip_max_pos,
             "skip_low_edge": self._skip_low_edge,
