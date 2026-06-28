@@ -1,0 +1,48 @@
+# docker-compose.live.yaml — Live trading container
+# Run with: docker compose -f docker-compose.live.yaml up -d
+#
+# CRITICAL: This uses live/.env for secrets (NEVER commit .env)
+# Container is separate from paper trading container (port 8082)
+
+services:
+  polyclaw-live:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polyclaw-live
+    restart: unless-stopped
+    env_file:
+      - ./live/.env  # Secrets loaded from file, not hardcoded
+    volumes:
+      # Live DB (separate from paper)
+      - ./data_live:/app/data
+      # Live config (conservative params)
+      - ./live/config:/app/config:ro
+      # Live module (wallet tools, executor, etc.)
+      - ./live:/app/live:ro
+    environment:
+      - BOT_MODE=live
+      - HTTP_HOST=0.0.0.0
+      - HTTP_PORT=8085
+      - LOG_FORMAT=json
+    ports:
+      # Live dashboard on port 8085 (paper is on 8082)
+      - "8085:8085"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 1g
+    cpus: 1.0
+    network_mode: bridge
+    # Log rotation (prevent disk fill)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

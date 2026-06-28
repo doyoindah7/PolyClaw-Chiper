@@ -1,0 +1,108 @@
+# Polyclaw Live — Config ($15 micro-test)
+# Conservative parameters for first live trading test
+# Override these in .env for environment-specific values
+
+bot:
+  mode: live
+  loop_interval_sec: 1
+  scan_interval_sec: 60
+  max_open_positions: 2  # Conservative — was 10 in paper
+
+market:
+  min_volume_24h_usd: 1000  # Higher bar for live (avoid illiquid)
+  min_liquidity: 500
+  api_page_size: 500
+  max_pages: 2  # Fewer pages = less API calls
+  track_max_markets: 100  # Fewer than paper (was 200)
+
+# === STRATEGY CONFIG (Conservative for $15 modal) ===
+strategies:
+  # Momentum only — proven strategy, disable others for first test
+  momentum:
+    enabled: true
+    lookback_short_sec: 30
+    lookback_long_sec: 120
+    min_momentum_short_pct: 1.0   # Higher threshold (was 0.5) — fewer, better signals
+    min_momentum_long_pct: 0.5
+    take_profit_pct: 5.0          # Lower TP (was 8) — take profit faster
+    stop_loss_pct: 3.0            # Tighter SL (was 4) — cut losses faster
+    max_hold_sec: 300
+    max_position_pct: 0.20        # 20% of bankroll = $3 max
+    max_positions: 2              # Only 2 concurrent
+    cooldown_sec: 60              # Longer cooldown (was 30)
+    min_entry_price: 0.15         # Skip extreme odds (was 0.10)
+    max_entry_price: 0.85
+    skip_random_outcome: true
+    allowed_categories: ["crypto", "sports_match", "sports_total", "economics", "other"]
+    # Per-market limit (autoclaw v3.5.12 fix)
+    max_per_market_pct: 0.30      # Max 30% bankroll per single market
+
+  # Disabled for first live test
+  atomic_arb:
+    enabled: false  # Leg risk too high for live
+  resolution_snipe:
+    enabled: false  # WR too low, needs backtest
+  latency_arb:
+    enabled: false  # Crypto markets unreliable
+  news_llm:
+    enabled: false
+
+# === RISK MANAGEMENT (Very Conservative) ===
+risk:
+  initial_bankroll_usd: 15.00
+  max_daily_drawdown_pct: 20.0   # 20% (was 50%) — auto-stop if -$3
+  max_consecutive_losses_global: 3  # 3 (was 8) — stop after 3 losses
+  max_trades_per_hour_global: 10  # 10 (was 60) — rate limit
+  session_rotation_min: 240
+  max_net_exposure_per_asset_pct: 30.0
+  max_position_age_sec: 1800
+  dead_position_age_sec: 900
+  # Absolute cap (autoclaw v3.5.12)
+  max_absolute_position: 3.0     # $3 hard cap (was $500 paper)
+
+  per_strategy:
+    momentum:
+      max_consecutive_losses: 2  # 2 (was 5) — quick disable
+      max_trades_per_hour: 10
+      max_capital_pct: 0.20
+
+  sizer:
+    cash_min_pct: 25             # 25% (was 15) — keep more cash buffer
+    max_pct_per_trade: 0.20
+    min_position_usd: 1.0        # $1 min (avoid decimal bug)
+    dynamic_cash_buffer: true
+    high_deploy_threshold: 0.60  # 60% (was 70%) — earlier warning
+    high_deploy_reserve: 0.30    # 30% (was 25%)
+
+# === EXECUTION (Live mode) ===
+execution:
+  mode: live  # "paper" | "live"
+  # Live-specific settings
+  live:
+    order_type: FAK              # Fill-and-Kill (partial fill OK, cancel rest)
+    submit_retries: 2            # Retry failed submissions
+    retry_delay_sec: 1.0
+    nonce_management: local      # Track nonce to avoid conflicts
+    gas_strategy: fast           # "slow" | "standard" | "fast"
+    max_gas_price_gwei: 500      # Cap to prevent overpay
+
+# === EMERGENCY CONTROLS ===
+safety:
+  kill_switch_file: /app/data/KILL_SWITCH  # Touch file to stop trading
+  emergency_stop_loss_usd: 5.0  # Auto-stop if total loss > $5
+  manual_confirm_threshold_usd: 20.0  # Require manual OK for >$20 (won't happen at $15)
+
+# === MONITORING ===
+monitoring:
+  log_level: INFO
+  log_format: json
+  web:
+    enabled: true
+    host: 0.0.0.0
+    port: 8085
+
+# === TIER (Locked for testing) ===
+tier:
+  mode: auto
+  force_tier: 1  # Stay aggressive (small modal)
+  cooldown_hours: 24

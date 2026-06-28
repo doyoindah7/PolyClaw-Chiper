@@ -1,0 +1,40 @@
+# /live/.gitignore — CRITICAL: Protect secrets
+
+# === NEVER COMMIT THESE ===
+.env
+.env.*
+!.env.example
+
+# Wallet files
+*.key
+*.pem
+*.keystore
+wallet/private_key.txt
+wallet/keystore.json
+wallet/seed_phrase.txt
+
+# API credentials
+wallet/api_creds.json
+creds.json
+
+# Live DB (contains trade history with real money)
+data_live/
+*.db
+*.db-wal
+*.db-shm
+
+# Logs (may contain sensitive data)
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Backup files
+*.bak
+*.backup
+*.tmp
