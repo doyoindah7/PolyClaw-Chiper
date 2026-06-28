@@ -11,6 +11,7 @@ services:
       - /home/ubuntu/polyclaw-cipher-v3/config:/app/config:ro
     environment:
       - BOT_MODE=ten
+      - HTTP_PORT=8083
     ports:
       - "8083:8083"
 

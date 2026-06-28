@@ -101,6 +101,7 @@ class StrategiesConfig(BaseModel):
 
 
 class SizerConfig(BaseModel):
+    model_config = {"extra": "allow"}
     initial_trade_pct: float = Field(default=0.05, ge=0.0, le=1.0)
     compound_factor: float = Field(default=1.5, ge=0.0)
     max_pct_per_trade: float = Field(default=0.65, ge=0.0, le=1.0)
@@ -114,6 +115,7 @@ class PerStrategyRisk(BaseModel):
 
 
 class RiskConfig(BaseModel):
+    model_config = {"extra": "allow"}
     initial_bankroll_usd: float = Field(default=25.0, ge=0.0)
     max_daily_drawdown_pct: float = Field(default=50.0, ge=0.0, le=100.0)
     max_consecutive_losses_global: int = Field(default=8, ge=1)
