@@ -35,7 +35,7 @@ strategies:
   # Lowered threshold 100→40 bps (Polymarket markets efficient, real arbs are 20-50 bps)
   # v3.3.1: Added category filter (was missing — traded sports_spread)
   atomic_arb:
-    enabled: true
+    enabled: false  # LIVE-READY: leg risk fatal, cannot simulate
     min_profit_bps: 100  # v3.5.8: 80->100 (sweet spot) — avoid break-even arb                # Min 0.4% profit after fees (lowered from 100)
     max_position_pct: 0.40            # 40% bankroll per arb (low risk)
     max_concurrent: 8  # v3.5.8: 5->8 (risk-free, capture more)
@@ -157,7 +157,7 @@ risk:
 # === EXECUTION — Paper Trading ===
 execution:
   paper:
-    slippage_bps: 25
+    slippage_bps: 70  # v3.x LIVE-READY: real spread 50-150bps
     fill_probability_base: 0.85
     fill_probability_at_bid_low: 0.95
     fill_probability_at_bid_high: 0.65

@@ -25,7 +25,7 @@ class PaperExecutor(BaseExecutor):
 
     def __init__(self, config: dict[str, Any] | None = None):
         c = config or {}
-        self.slippage_bps = c.get("slippage_bps", 25)
+        self.slippage_bps = c.get("slippage_bps", 70)  # LIVE-READY: real PM spread
         self.fill_prob_base = c.get("fill_probability_base", 0.85)
         self.fill_prob_at_bid_low = c.get("fill_probability_at_bid_low", 0.95)
         self.fill_prob_at_bid_high = c.get("fill_probability_at_bid_high", 0.65)
