@@ -64,6 +64,7 @@ class TelegramAlerter(Alerter):
         )
 
     async def notify_trade(self, side: str, entry_price: float, invested: float,
+                           confidence: float, question: str, strategy: str) -> None:
         pass  # silenced — too spammy
     async def notify_trade_close(self, strategy: str, side: str, pnl: float, reason: str) -> None:
         pass  # silenced — use /trades command
