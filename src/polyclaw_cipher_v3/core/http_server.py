@@ -870,7 +870,7 @@ function renderHistoryTable() {
     const strat = t.strategy || '';
     const safeQ = (t.market_question||'').replace(/"/g,'&quot;');
     const safeR = (t.reason||'').replace(/"/g,'&quot;');
-    html += '<tr style="cursor:pointer" onclick="toggleTradeDetail(\'' + t.id + '\')">' +
+    html += '<tr style="cursor:pointer" onclick="toggleTradeDetail(\\'' + t.id + '\\')">' +
       '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + safeQ + '">' + (t.market_question||'').substring(0,35) + '</td>' +
       '<td><span class="tag ' + strat + '">' + strat + '</span></td>' +
       '<td class="side-' + (t.side||'') + '">' + (t.side||'') + '</td>' +
