@@ -64,24 +64,9 @@ class TelegramAlerter(Alerter):
         )
 
     async def notify_trade(self, side: str, entry_price: float, invested: float,
-                           confidence: float, question: str, strategy: str) -> None:
-        emoji = G if side == "YES" else R
-        short_q = question[:45] + ("..." if len(question) > 45 else "")
-        self._send(
-            f"{emoji} *{strategy} {side}* opened\n"
-            f"Entry: {entry_price:.4f} | ${invested:.2f}\n"
-            f"Conf: {confidence:.0%} | {short_q}"
-        )
-
+        pass  # silenced — too spammy
     async def notify_trade_close(self, strategy: str, side: str, pnl: float, reason: str) -> None:
-        emoji = G if pnl > 0 else (W if abs(pnl) < 0.01 else R)
-        pnl_pct = reason.split(":")[-1].strip() if ":" in reason else ""
-        self._send(
-            f"{emoji} *{strategy} {side}* closed\n"
-            f"PnL: ${pnl:+.2f} {pnl_pct}\n"
-            f"Reason: {reason[:60]}"
-        )
-
+        pass  # silenced — use /trades command
     async def notify_pnl(self, bankroll: float, initial: float, trades: int, win_rate: float) -> None:
         pnl = bankroll - initial
         pnl_pct = (pnl / initial * 100) if initial > 0 else 0

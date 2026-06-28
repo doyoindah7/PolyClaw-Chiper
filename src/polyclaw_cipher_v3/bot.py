@@ -645,49 +645,55 @@ class PolyClawCipherV3:
         )
 
     async def _tg_cmd_status(self) -> None:
-        snap = self._get_stats()
-        br = snap.get("bankroll", 0)
-        init = snap.get("initial_bankroll", 25)
-        pnl = br - init
-        pnl_pct = (pnl / init * 100) if init > 0 else 0
-        trades = snap.get("trades", 0)
-        wr = snap.get("win_rate", 0)
-        wins = snap.get("wins", 0)
-        losses = snap.get("losses", 0)
-        opens = len(snap.get("open_positions", []))
-        tier = snap.get("tier", {})
-        uptime = snap.get("uptime_sec", 0)
-        u_m, u_s = divmod(uptime, 60); u_h, u_m = divmod(u_m, 60)
-        emoji = _TG_G if pnl >= 0 else _TG_R
-        self.tg._send(
-            f"<b>PolyClaw-Cipher v3.5.12</b>\n"
-            f"⏱ Uptime: {int(u_h)}h {int(u_m)}m | Tier {tier.get('current_tier', 1)}\n\n"
-            f"{emoji} *${br:.2f}* ({pnl_pct:+.1f}% dari ${init:.0f})\n"
-            f"📊 {trades} trades | {wr:.1f}% WR | {wins}W/{losses}L\n"
-            f"{_TG_B} {opens} open position{'s' if opens != 1 else ''}\n\n"
-            f"🌐 [Dashboard](http://3.107.53.103:8082/)"
-        )
-
+        """Dual-instance status — shows both 8082 ($25) and 8083 ($10)."""
+        import urllib.request, json as _json
+        lines = ["🔍 <b>PolyClaw-Cipher v3.5.12</b>\n"]
+        for port, label in [(8082, "#0 $25"), (8083, "#1 $10")]:
+            try:
+                req = urllib.request.Request(f"http://3.107.53.103:{port}/api/stats")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    snap = _json.loads(resp.read())
+                br = snap.get("bankroll", 0)
+                init = snap.get("initial_bankroll", 25)
+                pnl = br - init
+                pnl_pct = (pnl / init * 100) if init > 0 else 0
+                trades = snap.get("trades", 0)
+                wr = snap.get("win_rate", 0)
+                opens = len(snap.get("open_positions", []))
+                tier = snap.get("tier", {})
+                emoji = "🟢" if pnl >= 0 else "🔴"
+                dash = f"http://3.107.53.103:{port}/"
+                lines.append(f"{emoji} <b>{label}</b>: ${br:.2f} ({pnl_pct:+.1f}%) | {trades}T {wr:.0f}%WR | {opens} open | <a href='{dash}'>T{tier.get('current_tier',1)}</a>")
+            except Exception:
+                lines.append(f"⭕ <b>{label}</b>: OFFLINE")
+        self.tg._send("\n".join(lines))
     async def _tg_cmd_positions(self) -> None:
-        snap = self._get_stats()
-        positions = snap.get("open_positions", [])
-        if not positions:
-            self.tg._send(f"<b>No open positions</b>")
-            return
-        lines = [f"<b>Open Positions ({len(positions)})</b>"]
-        for i, p in enumerate(positions, 1):
-            e = p.get("entry_price", 0)
-            c = p.get("current_price", 0)
-            pnl_pct = (c - e) / e * 100 if e > 0 else 0
-            inv = p.get("invested", 0)
-            emoji = _TG_G if pnl_pct >= 0 else _TG_R
-            q = (p.get("market_question") or "?")[:40]
-            lines.append(
-                f"\n{i}\. {emoji} *{p.get('strategy', '?')} {p.get('side', '?')}* | {q}\n"
-                f"   Entry {e:.4f} → Now {c:.4f} ({pnl_pct:+.1f}%) | ${inv:.2f}"
-            )
-        self.tg._send("".join(lines))
-
+        """Dual-instance open positions."""
+        import urllib.request, json as _json
+        lines = ["📊 <b>Open Positions</b>\n"]
+        total = 0
+        for port, label in [(8082, "#0 $25"), (8083, "#1 $10")]:
+            try:
+                req = urllib.request.Request(f"http://3.107.53.103:{port}/api/stats")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    snap = _json.loads(resp.read())
+                positions = snap.get("open_positions", [])
+                if positions:
+                    lines.append(f"<b>{label}</b>")
+                    for p in positions:
+                        e = p.get("entry_price", 0)
+                        c = p.get("current_price", 0)
+                        pnl_pct = (c - e) / e * 100 if e > 0 else 0
+                        inv = p.get("invested", 0)
+                        emoji = "🟢" if pnl_pct >= 0 else "🔴"
+                        q = (p.get("market_question") or "?")[:35]
+                        lines.append(f"  {emoji} {p.get('side','?')} {e:.4f}→{c:.4f} ({pnl_pct:+.1f}%) ${inv:.2f} | {q}")
+                    total += len(positions)
+            except Exception:
+                pass
+        if total == 0:
+            lines.append("No open positions")
+        self.tg._send("\n".join(lines))
     async def _tg_cmd_trades(self) -> None:
         snap = self._get_stats()
         trades = snap.get("recent_trades", [])[:20]
@@ -728,6 +734,24 @@ class PolyClawCipherV3:
             lines.append(f"{i}\. {_TG_R} ${pnl:+.2f} \({pnl_pct:+.1f}%\) | {q}")
         self.tg._send("\n".join(lines))
 
+    async def _tg_cmd_health(self) -> None:
+        """Dual-instance health check."""
+        import urllib.request, json as _json
+        lines = ["🫀 <b>Bot Health</b>\n"]
+        for port, label in [(8082, "#0 $25"), (8083, "#1 $10")]:
+            try:
+                req = urllib.request.Request(f"http://3.107.53.103:{port}/api/health")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    h = _json.loads(resp.read())
+                ut = h.get("uptime_sec", 0)
+                u_m, u_s = divmod(ut, 60); u_h, u_m = divmod(u_m, 60)
+                lines.append(f"✅ <b>{label}</b>: online {int(u_h)}h{int(u_m)}m | v{h.get('version','?')}")
+            except Exception:
+                lines.append(f"❌ <b>{label}</b>: OFFLINE")
+        dash1 = "http://3.107.53.103:8082/"
+        dash2 = "http://3.107.53.103:8083/"
+        lines.append(f"\n🌐 <a href='{dash1}'>Dashboard 8082</a> | <a href='{dash2}'>8083</a>")
+        self.tg._send("\n".join(lines))
     async def _tg_cmd_health(self) -> None:
         import subprocess, time as _time
         snap = self._get_stats()
