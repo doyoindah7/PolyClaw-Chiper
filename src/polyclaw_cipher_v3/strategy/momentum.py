@@ -37,6 +37,8 @@ class MomentumStrategy(BaseStrategy):
         self.max_notional_pct = c.get("max_notional_pct", 0.15)
         self.min_confidence = c.get("min_confidence", 0.40)
         self.max_volatility = c.get("max_volatility", 0.08)
+        # v3.5.12: Max % bankroll in single market
+        self.max_per_market_pct = c.get("max_per_market_pct", 0.30)
         # FIX v3.4.0 (ARCH-1): Category filter — skip random-outcome markets
         self.skip_random_outcome = c.get("skip_random_outcome", True)
         # Updated fallback default from stale "sports_derivative"

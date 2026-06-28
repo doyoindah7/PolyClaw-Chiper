@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  polyclaw-ten:
+    build:
+      context: .
+    container_name: polyclaw-ten
+    restart: unless-stopped
+    volumes:
+      - /home/ubuntu/polyclaw-cipher-v3/data_ten:/app/data
+      - /home/ubuntu/polyclaw-cipher-v3/config:/app/config:ro
+    environment:
+      - BOT_MODE=ten
+    ports:
+      - "8083:8083"
+
+networks:
+  polyclaw-ten_default:
+    driver: bridge
