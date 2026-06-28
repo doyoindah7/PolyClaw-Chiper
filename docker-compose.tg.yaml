@@ -10,6 +10,7 @@ services:
     environment:
       - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
       - TG_CHAT_ID=2051570522
+      - BOT_API_BASE=http://18.200.234.149
     volumes:
       - ./scripts:/app/scripts:ro
     depends_on: []

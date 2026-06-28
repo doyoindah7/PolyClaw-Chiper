@@ -11,7 +11,7 @@ import json, os, sys, time, urllib.request
 
 TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TG_CHAT_ID", "")
-API_BASE = "http://3.107.53.103"
+API_BASE = os.environ.get("BOT_API_BASE", "http://localhost")
 INSTANCES = [
     (8082, "#0 $25"),
     (8084, "#1 $15"),
