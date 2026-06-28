@@ -10,6 +10,7 @@ services:
     environment:
       - BOT_MODE=fifteen
       - HTTP_PORT=8084
+      - INITIAL_BANKROLL_USD=15.0
       - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
       - TG_CHAT_ID=2051570522
       - TG_DISABLE_POLL=true

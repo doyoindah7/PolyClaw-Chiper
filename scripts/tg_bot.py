@@ -14,10 +14,10 @@ CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 API_BASE = "http://3.107.53.103"
 INSTANCES = [
     (8082, "#0 $25"),
-    (8083, "#1 $10"),
+    (8084, "#1 $15"),
 ]
 DASH_8082 = f"{API_BASE}:8082/"
-DASH_8083 = f"{API_BASE}:8083/"
+DASH_8084 = f"{API_BASE}:8084/"
 
 if not TOKEN or not CHAT_ID:
     print("FATAL: TG_BOT_TOKEN or TG_CHAT_ID not set", file=sys.stderr)

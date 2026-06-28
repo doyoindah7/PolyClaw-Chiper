@@ -4,7 +4,7 @@
 
 ## Overview
 
-Live trading module for Polyclaw-Chiper bot. Uses `py-clob-client-v2` for order signing/submission, `web3.py` for chain reads, and implements conservative risk management for small initial capital ($15).
+Live trading module for Polyclaw-Chiper bot. Uses `py-clob-client` (v0.34.x) for order signing/submission, `web3.py` for chain reads, and implements conservative risk management for small initial capital ($15). EOA wallet (sig_type=0). CLOB orders are gasless (off-chain matching).
 
 ## Architecture
 
@@ -14,6 +14,8 @@ live/
 ├── .env.example              # Template (safe to commit)
 ├── .gitignore                # Protects .env, *.key, wallet files
 ├── README.md                 # This file
+│
+├── preflight.py              # Full integration test (2 stages)
 │
 ├── wallet/                   # One-time wallet setup tools
 │   ├── generate_wallet.py    # Create new EOA wallet
@@ -44,134 +46,69 @@ live/
     └── live.yaml             # Conservative params ($15 modal)
 ```
 
-## Setup Guide (Step-by-Step)
+## Quick Setup (2 Steps)
 
-### Prerequisites
-
-- Python 3.11+
-- `pip install web3 eth-account py-clob-client-v2 httpx`
-- Alchemy account (free tier OK) — get API key at https://alchemy.com
-- $15 to fund wallet ($1 MATIC + $14 USDC.e on Polygon)
-
-### Step 1: Generate Wallet
+### Step 1: Generate Wallet + .env
 
 ```bash
-cd /path/to/PolyClaw-Chiper
 python live/wallet/generate_wallet.py
 ```
 
-Output:
-```
-Wallet Address : 0xABC123...
-Private Key    : 0xDEF456...
-```
+Saves to `live/.env`. Set `POLYGON_RPC_URL` — working public endpoints:
+- `https://polygon-bor-rpc.publicnode.com` (free, reliable)
+- `https://1rpc.io/matic` (free, fallback)
 
-⚠️ **SAVE PRIVATE KEY SECURELY** — anyone with this key has full access to your funds.
+No API key needed for public RPCs.
 
-### Step 2: Configure .env
+### Step 2: Fund Wallet
 
-```bash
-cp live/.env.example live/.env
-nano live/.env
-```
-
-Fill in:
-```env
-WALLET_PRIVATE_KEY=0xDEF456...    # from Step 1
-WALLET_ADDRESS=0xABC123...        # from Step 1
-POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY
-POLYGON_RPC_FALLBACK_URL=https://polygon-mainnet.infura.io/v3/YOUR_KEY
-```
-
-Leave `CLOB_API_KEY`, `CLOB_API_SECRET`, `CLOB_API_PASSPHRASE` empty for now — we'll derive them in Step 5.
-
-### Step 3: Fund Wallet
-
-Send to your wallet address (from Step 1):
+Send to your wallet address from Step 1:
 
 | Asset | Amount | Network | Purpose |
 |---|---|---|---|
-| MATIC | $1.00 | Polygon | Gas for approvals + redeems |
-| USDC.e | $14.00 | Polygon | Trading capital |
+| MATIC | ~$1.00 | Polygon (137) | Gas for approvals + trades |
+| USDC.e | ~$1.00+ | Polygon (137) | Trading capital (start small) |
 
-**Where to get:**
-- MATIC: Buy on Binance/Coinbase, withdraw to Polygon network
-- USDC.e: Bridge from Ethereum via Polygon Bridge, or buy on Polygon DEX
+Contract addresses (Polygon Mainnet):
+- USDC.e: `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
+- CTF Exchange: `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`
 
-⚠️ **Verify network is Polygon (chain ID 137)**, not Ethereum mainnet.
+---
 
-### Step 4: Approve Contracts (One-Time)
+## Pre-Flight Integration Test
 
-```bash
-python live/wallet/approve_contracts.py
-```
-
-This submits 4 on-chain transactions (~$0.01-0.05 gas total):
-1. USDC.e → CTF Exchange
-2. USDC.e → Negative Risk Adapter
-3. ConditionalTokens → CTF Exchange (setApprovalForAll)
-4. ConditionalTokens → Negative Risk Adapter (setApprovalForAll)
-
-Verify on Polygonscan: `https://polygonscan.com/address/YOUR_WALLET`
-
-### Step 5: Derive CLOB API Key
+**One script to validate everything BEFORE real money enters.**
 
 ```bash
-python live/wallet/derive_api_key.py
+# Stage 1: Dry tests (free — no funds needed)
+python live/preflight.py --stage 1
+
+# Stage 2: Wet tests (needs MATIC + USDC.e funded)
+python live/preflight.py --stage 2
 ```
 
-This signs an L1 EIP-712 message (off-chain, no gas cost) to derive L2 API credentials. The script auto-saves them to `.env`.
+### Stage 1 Checks (8/8 required)
+1. Python dependencies (web3, eth-account)
+2. Wallet key validation (address matches private key)
+3. RPC connectivity (Polygon chain ID 137, block height)
+4. Gamma API (Polymarket market data)
+5. CLOB server time (connectivity check)
+6. API key derivation (EIP-712 L1 signature via py-clob-client)
 
-- `CLOB_API_KEY` — public identifier
-- `CLOB_API_SECRET` — HMAC secret
-- `CLOB_API_PASSPHRASE` — additional auth
+### Stage 2 Checks (after funding)
+1. MATIC balance (need >= 0.5 for gas)
+2. USDC.e balance (need >= $1.00 for test trade)
+3. Contract approvals (4x: USDC->CTF, USDC->NegRisk, CTF->CTF, CTF->NegRisk)
+4. Open $1 order on real market
+5. Cancel order — verify pipeline works
 
-### Step 6: Verify Full Setup
+**If Stage 2 passes:** pipeline verified. Ready for live trading.
 
-```bash
-python live/wallet/verify_setup.py
-```
+---
 
-Runs 8 checks:
-1. ✅ Environment variables set
-2. ✅ Private key → address derivation
-3. ✅ Polygon RPC connection
-4. ✅ MATIC balance ≥ 0.5
-5. ✅ USDC.e balance ≥ 1.0
-6. ✅ 4 contract approvals
-7. ✅ CLOB API client initialized
-8. ✅ CLOB API reachable
+## Detailed Wallet Setup (Manual)
 
-If all pass → ready for test order.
-
-### Step 7: $1 Test Order
-
-```bash
-python live/scripts/test_1_dollar.py
-```
-
-Submits ONE small FAK order (~$1) to a liquid market. Verifies:
-- Order signing works
-- API authentication works
-- Order fills (or partial fills)
-- Position appears in Polymarket
-
-**If $1 order succeeds** → pipeline verified, proceed to Step 8.
-
-**If $1 order fails** → check error, fix, retry. Do NOT deposit more until this works.
-
-### Step 8: Start Live Trading
-
-```bash
-# Deploy live container
-docker compose -f docker-compose.live.yaml up -d
-
-# Monitor
-docker logs -f polyclaw-live
-
-# Dashboard
-open http://3.107.53.103:8085
-```
+If you prefer step-by-step over the automated preflight:
 
 ## Safety Features
 
@@ -202,13 +139,15 @@ safety:
 
 ### Conservative Defaults
 
-| Parameter | Paper | Live ($15) |
+| Parameter | $25 Paper | $15 Live |
 |---|---|---|
-| Max position | $500 | **$3** |
-| Max open positions | 10 | **2** |
-| Max daily drawdown | 50% | **20%** |
-| Max consecutive losses | 8 | **3** |
-| Strategies enabled | 4 | **1 (momentum only)** |
+| Max position | $65 (65%/trade) | **$1.50 (10%/trade)** |
+| Max open positions | 10 | **3** |
+| Max daily drawdown | 40% | **20%** |
+| Max consecutive losses | 6 | **3** |
+| Strategies enabled | momentum | **momentum only** |
+| Auto-tune | at startup | at startup |
+| CLOB WS tokens | 134 | 134 |
 
 ## Common Issues
 

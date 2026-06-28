@@ -3,7 +3,6 @@
 # Port 8084, data_fifteen/
 
 bot:
-  initial_bankroll: 15.0
   scan_interval_sec: 60
   loop_interval_sec: 1
 
@@ -17,6 +16,7 @@ sizer:
   max_open_positions: 4
 
 risk:
+  initial_bankroll_usd: 15.0   # ← PENTING: override dari default 25.0
   max_consecutive_losses_global: 6
   max_daily_drawdown_pct: 40.0
   max_trades_per_hour_global: 30

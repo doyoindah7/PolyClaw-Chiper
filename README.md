@@ -4,9 +4,12 @@
 
 **Repository:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
 **Version:** 3.5.13 (Live-realism Tier 1 — 6 simulations for paper→live parity — 2026-06-28)
-**Status:** RUNNING — 2 instances paper trading at http://3.107.53.103:8082/ + http://3.107.53.103:8083/
-**Bankroll:** $25 instance (Run 2 consistency test) | $10 instance (micro-cap growth validation)
-**TG Bot:** @polyclawchiper_bot — standalone container, dual-instance commands
+**Status:** RUNNING — 2 paper instances + TG bot + live wallet ready
+- `polyclaw-cipher-v3` — $25 paper, port **8082**
+- `polyclaw-fifteen` — $15 paper (live-mirror config), port **8084**
+- `polyclaw-tg-bot` — Telegram bot @polyclawchiper_bot, 32MB RAM
+- Dashboard: http://3.107.53.103:8082/ + http://3.107.53.103:8084/
+- Live: wallet generated, pre-flight Stage 1 passed (8/8)
 
 ---
 
@@ -19,16 +22,31 @@ cd PolyClaw-Chiper
 # Single instance ($25 bankroll)
 docker compose up --build -d
 
-# Or two instances ($25 + $10)
-docker compose up --build -d                    # $25 on port 8082
-docker compose -f docker-compose.ten.yaml up --build -d  # $10 on port 8083
+# $15 instance (live-mirror config, momentum-only)
+docker compose -f docker-compose.fifteen.yaml up --build -d
+
+# Live trading (requires funded wallet + preflight passed)
+# See live/README.md for full setup guide
+# docker compose -f docker-compose.live.yaml up --build -d
 
 # TG bot (standalone, 32MB RAM)
 docker compose -f docker-compose.tg.yaml up --build -d
 
-# Dashboard: http://<VPS_IP>:8082/  and  http://<VPS_IP>:8083/
+# Dashboard: http://<VPS_IP>:8082/  and  http://<VPS_IP>:8084/
 # Health:    curl http://localhost:8082/api/health
 ```
+
+### Live Trading Setup
+
+1. **Generate wallet**: `python live/wallet/generate_wallet.py`
+2. **Pre-flight test (Stage 1)**: `python live/preflight.py --stage 1` — validates RPC, CLOB, API key (free)
+3. **Fund wallet**: ~$1 MATIC + ~$1 USDC.e on Polygon (137)
+4. **Pre-flight test (Stage 2)**: `python live/preflight.py --stage 2` — balances, approvals, $1 trade
+5. **Deploy live**: `docker compose -f docker-compose.live.yaml up --build -d`
+
+Full guide: [live/README.md](live/README.md)
+
+---
 
 ---
 
