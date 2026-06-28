@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  tg-bot:
+    build:
+      context: .
+    container_name: polyclaw-tg-bot
+    restart: unless-stopped
+    command: python3 scripts/tg_bot.py
+    environment:
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+    volumes:
+      - ./scripts:/app/scripts:ro
+    depends_on: []
+    deploy:
+      resources:
+        limits:
+          memory: 32M

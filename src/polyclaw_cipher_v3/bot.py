@@ -21,7 +21,6 @@ import time
 from typing import Any
 
 from .alerts import Alerter
-from .alerts.telegram import TelegramAlerter, G as _TG_G, R as _TG_R, Y as _TG_Y, B as _TG_B, W as _TG_W
 from .config import load_config
 from .core.binance_ws import BinanceFeed
 from .core.clob_ws import CLOBFeed
@@ -79,12 +78,7 @@ class PolyClawCipherV3:
         self.executor = PaperExecutor(self.config.get("execution", {}).get("paper", {}))
 
         # Alerts (stub)
-        tg_cfg = {
-            "bot_token": os.environ.get("TG_BOT_TOKEN", ""),
-            "chat_id": os.environ.get("TG_CHAT_ID", ""),
-        }
-        self.tg = TelegramAlerter(tg_cfg)
-        self.alerter = self.tg if self.tg.enabled else Alerter(self.config.get("monitoring", {}))
+        self.alerter = Alerter(self.config.get("monitoring", {}))
 
         # Strategies
         s_conf = self.config.get("strategies", {})
@@ -173,8 +167,6 @@ class PolyClawCipherV3:
         self._stats_task = asyncio.create_task(self._refresh_stats_loop(), name="stats_cache")
         # v3.5.5 FIX (P1-03): Periodic WAL checkpoint every 30 min to flush WAL file
         self._checkpoint_task = asyncio.create_task(self._checkpoint_loop(), name="wal_checkpoint")
-        if self.tg.enabled and not os.environ.get("TG_DISABLE_POLL"):
-            self._tg_task = asyncio.create_task(self._tg_poll_loop(), name="tg_poller")
 
         await self.alerter.notify_startup(
             self.wallet.bankroll,
@@ -584,199 +576,6 @@ class PolyClawCipherV3:
         # Always compute uptime fresh (cache might be stale)
         stats["uptime_sec"] = int(time.time() - self._start_time) if self._start_time else 0
         return stats
-
-
-    # === TG Bot Command Poller ===
-
-    async def _tg_poll_loop(self) -> None:
-        """Long-poll Telegram for commands (30s timeout). Minimal CPU usage."""
-        import urllib.request, json as _json
-        token = os.environ.get("TG_BOT_TOKEN", "")
-        chat_id = os.environ.get("TG_CHAT_ID", "")
-        if not token or not chat_id:
-            return
-        base = f"https://api.telegram.org/bot{token}"
-        offset = 0
-        while True:
-            try:
-                url = f"{base}/getUpdates?offset={offset}&timeout=30"
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=35) as resp:
-                    data = _json.loads(resp.read())
-                if data.get("ok") and data.get("result"):
-                    for upd in data["result"]:
-                        offset = upd["update_id"] + 1
-                        msg = upd.get("message", {})
-                        if str(msg.get("chat", {}).get("id")) != str(chat_id):
-                            continue
-                        text = (msg.get("text") or "").strip()
-                        await self._tg_handle(text)
-            except Exception as e:
-                logger.warning("TG poll error: %s", e)
-                await asyncio.sleep(10)
-
-    async def _tg_handle(self, text: str) -> None:
-        """Route Telegram commands."""
-        cmd = text.split()[0].lower() if text else ""
-        if cmd == "/start":
-            await self._tg_cmd_start()
-        elif cmd == "/status":
-            await self._tg_cmd_status()
-        elif cmd == "/positions":
-            await self._tg_cmd_positions()
-        elif cmd in ("/trades", "/history"):
-            await self._tg_cmd_trades()
-        elif cmd in ("/top", "/pnl"):
-            await self._tg_cmd_top()
-        elif cmd == "/health":
-            await self._tg_cmd_health()
-        elif cmd == "/dashboard":
-            self.tg._send(f"🌐 http://3.107.53.103:8082/")
-
-    async def _tg_cmd_start(self) -> None:
-        self.tg._send(
-            f"<b>PolyClaw-Cipher v3.5.12</b>\n\n"
-            f"/status \- Bankroll, PnL, WR, uptime\n"
-            f"/positions \- Open positions detail\n"
-            f"/trades \- Last 20 trades\n"
-            f"/top \- Top 5 profits & losses\n"
-            f"/health \- Daemon & bot health\n"
-            f"/dashboard \- Live dashboard link"
-        )
-
-    async def _tg_cmd_status(self) -> None:
-        """Dual-instance status — shows both 8082 ($25) and 8083 ($10)."""
-        import urllib.request, json as _json
-        lines = ["🔍 <b>PolyClaw-Cipher v3.5.12</b>\n"]
-        for port, label in [(8082, "#0 $25"), (8083, "#1 $10")]:
-            try:
-                req = urllib.request.Request(f"http://3.107.53.103:{port}/api/stats")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    snap = _json.loads(resp.read())
-                br = snap.get("bankroll", 0)
-                init = snap.get("initial_bankroll", 25)
-                pnl = br - init
-                pnl_pct = (pnl / init * 100) if init > 0 else 0
-                trades = snap.get("trades", 0)
-                wr = snap.get("win_rate", 0)
-                opens = len(snap.get("open_positions", []))
-                tier = snap.get("tier", {})
-                emoji = "🟢" if pnl >= 0 else "🔴"
-                dash = f"http://3.107.53.103:{port}/"
-                lines.append(f"{emoji} <b>{label}</b>: ${br:.2f} ({pnl_pct:+.1f}%) | {trades}T {wr:.0f}%WR | {opens} open | <a href='{dash}'>T{tier.get('current_tier',1)}</a>")
-            except Exception:
-                lines.append(f"⭕ <b>{label}</b>: OFFLINE")
-        self.tg._send("\n".join(lines))
-    async def _tg_cmd_positions(self) -> None:
-        """Dual-instance open positions."""
-        import urllib.request, json as _json
-        lines = ["📊 <b>Open Positions</b>\n"]
-        total = 0
-        for port, label in [(8082, "#0 $25"), (8083, "#1 $10")]:
-            try:
-                req = urllib.request.Request(f"http://3.107.53.103:{port}/api/stats")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    snap = _json.loads(resp.read())
-                positions = snap.get("open_positions", [])
-                if positions:
-                    lines.append(f"<b>{label}</b>")
-                    for p in positions:
-                        e = p.get("entry_price", 0)
-                        c = p.get("current_price", 0)
-                        pnl_pct = (c - e) / e * 100 if e > 0 else 0
-                        inv = p.get("invested", 0)
-                        emoji = "🟢" if pnl_pct >= 0 else "🔴"
-                        q = (p.get("market_question") or "?")[:35]
-                        lines.append(f"  {emoji} {p.get('side','?')} {e:.4f}→{c:.4f} ({pnl_pct:+.1f}%) ${inv:.2f} | {q}")
-                    total += len(positions)
-            except Exception:
-                pass
-        if total == 0:
-            lines.append("No open positions")
-        self.tg._send("\n".join(lines))
-    async def _tg_cmd_trades(self) -> None:
-        snap = self._get_stats()
-        trades = snap.get("recent_trades", [])[:20]
-        if not trades:
-            self.tg._send(f"{_TG_B} No trades yet")
-            return
-        wins = sum(1 for t in trades if t.get("pnl_dollar", 0) > 0)
-        lines = [f"<b>Last {len(trades)} Trades</b>\n"]
-        for t in trades:
-            emoji = _TG_G if t.get("pnl_dollar", 0) > 0 else _TG_R
-            q = (t.get("reason") or t.get("market_question") or "?")[:35]
-            pnl = t.get("pnl_dollar", 0)
-            pnl_pct = t.get("pnl_percent", 0)
-            lines.append(
-                f"{emoji} ${pnl:+.2f} \({pnl_pct:+.1f}%\) | "
-                f"{t.get('strategy', '?')} {t.get('side', '?')} | {q}"
-            )
-        self.tg._send("\n".join(lines) + f"\n\n{_TG_B} {wins}W / {len(trades)-wins}L")
-
-    async def _tg_cmd_top(self) -> None:
-        snap = self._get_stats()
-        trades = snap.get("recent_trades", [])
-        # Get all trades sorted by PnL from DB
-        tops = sorted(trades, key=lambda t: t.get("pnl_dollar", 0), reverse=True)
-        tops5 = tops[:5]
-        bots5 = sorted(trades, key=lambda t: t.get("pnl_dollar", 0))[:5]
-        lines = [f"<b>Top 5 Profits</b>\n"]
-        for i, t in enumerate(tops5, 1):
-            q = (t.get("reason") or t.get("market_question") or "?")[:35]
-            pnl = t.get("pnl_dollar", 0)
-            pnl_pct = t.get("pnl_percent", 0)
-            lines.append(f"{i}\. {_TG_G} ${pnl:+.2f} \({pnl_pct:+.1f}%\) | {q}")
-        lines.append(f"\n<b>Top 5 Losses</b>\n")
-        for i, t in enumerate(bots5, 1):
-            q = (t.get("reason") or t.get("market_question") or "?")[:35]
-            pnl = t.get("pnl_dollar", 0)
-            pnl_pct = t.get("pnl_percent", 0)
-            lines.append(f"{i}\. {_TG_R} ${pnl:+.2f} \({pnl_pct:+.1f}%\) | {q}")
-        self.tg._send("\n".join(lines))
-
-    async def _tg_cmd_health(self) -> None:
-        """Dual-instance health check."""
-        import urllib.request, json as _json
-        lines = ["🫀 <b>Bot Health</b>\n"]
-        for port, label in [(8082, "#0 $25"), (8083, "#1 $10")]:
-            try:
-                req = urllib.request.Request(f"http://3.107.53.103:{port}/api/health")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    h = _json.loads(resp.read())
-                ut = h.get("uptime_sec", 0)
-                u_m, u_s = divmod(ut, 60); u_h, u_m = divmod(u_m, 60)
-                lines.append(f"✅ <b>{label}</b>: online {int(u_h)}h{int(u_m)}m | v{h.get('version','?')}")
-            except Exception:
-                lines.append(f"❌ <b>{label}</b>: OFFLINE")
-        dash1 = "http://3.107.53.103:8082/"
-        dash2 = "http://3.107.53.103:8083/"
-        lines.append(f"\n🌐 <a href='{dash1}'>Dashboard 8082</a> | <a href='{dash2}'>8083</a>")
-        self.tg._send("\n".join(lines))
-    async def _tg_cmd_health(self) -> None:
-        import subprocess, time as _time
-        snap = self._get_stats()
-        uptime = snap.get("uptime_sec", 0)
-        u_m, u_s = divmod(uptime, 60); u_h, u_m = divmod(u_m, 60)
-        ws = snap.get("ws_status", {})
-        clob = "Connected" if ws.get("clob_connected") else "Disconnected"
-        clob_tokens = ws.get("clob_tokens", 0)
-        binance = "Connected" if ws.get("binance_connected") else "Disconnected"
-        # Check for errors
-        try:
-            r = subprocess.run(["pgrep", "-f", "daemon.py"], capture_output=True, text=True)
-            daemon_pid = r.stdout.strip()
-        except:
-            daemon_pid = ""
-        lines = [
-            f"🫀 *Bot Health*\n",
-            f"⏱ Bot uptime: {int(u_h)}h {int(u_m)}m {int(u_s)}s",
-            f"📡 CLOB WS: {clob} \({clob_tokens} tokens\)",
-            f"📡 Binance WS: {binance}",
-            f"💾 WAL: {snap.get('wal_size_mb', 0):.1f}MB" if snap.get('wal_size_mb') else "",
-            f"🚦 Status: {'✅ Normal' if snap.get('bankroll', 0) > 0 else '⚠️ Check'}",
-            f"\n🌐 [Dashboard](http://3.107.53.103:8082/)",
-        ]
-        self.tg._send("\n".join(lines))
 
     def _build_stats_sync(self) -> dict[str, Any]:
         """Build minimal stats without DB access (fallback for cold start).
