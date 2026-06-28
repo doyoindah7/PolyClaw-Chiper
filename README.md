@@ -57,6 +57,7 @@ docker compose -f docker-compose.tg.yaml up --build -d
 - **Wallet invariant** — bankroll == cash + invested (verified every cycle)
 - **Duplicate trade detection** — zero tolerance
 - **Auto-archive** — DB backup + CSV export before every reset
+- **Trade analyzer** — `scripts/analyze_trades.py` learns from past runs, generates config recommendations for next cycle
 
 ### Live-Realism Simulations (v3.5.13 — Tier 1)
 Paper trading now simulates real-world execution friction for accurate live-readiness validation:
@@ -102,17 +103,17 @@ docker compose stop
 docker compose -f docker-compose.ten.yaml stop
 docker compose -f docker-compose.tg.yaml stop
 
-# Reset bankroll for new cycle
+# Reset bankroll for new cycle (with analysis)
+python3 scripts/archive_trades.py         # 1. Archive current run
+python3 scripts/analyze_trades.py --apply  # 2. Analyze + generate config overlay
+# 3. Reset DB (see below)
 docker exec polyclaw-cipher-v3 python3 -c "
 import sqlite3, time
 db = sqlite3.connect('/app/data/cipher_v3.db')
 db.execute('UPDATE wallet SET bankroll=25.0, cash=25.0 WHERE id=1')
 db.commit()
 "
-docker compose restart
-
-# Archive trades before reset
-python3 scripts/archive_trades.py
+docker compose restart                   # 4. Start fresh with improved config
 
 # Logs
 docker logs -f polyclaw-cipher-v3
@@ -166,6 +167,7 @@ PolyClaw-Chiper/
 ├── scripts/
 │   ├── daemon.py                # Auto-heal daemon (24/7)
 │   ├── archive_trades.py        # Trade DB archiver
+│   ├── analyze_trades.py        # Trade analyzer + config recommender
 │   └── tg_bot.py                # Standalone TG bot (dual-instance)
 ├── src/polyclaw_cipher_v3/
 │   ├── bot.py                   # Orchestrator + admin endpoints
@@ -190,7 +192,7 @@ PolyClaw-Chiper/
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 3.5.13 | 2026-06-28 | Live-realism Tier 1: liquidity slippage, fill probability, on-chain delay, gas fee, API rate limit, position state sync. Exit slippage fix. PENDING timeout. Standalone TG bot container. |
+| 3.5.13 | 2026-06-28 | Live-realism Tier 1: liquidity slippage, fill probability, on-chain delay, gas fee, API rate limit, position state sync. Exit slippage fix. PENDING timeout. Standalone TG bot container. Trade analyzer script. |
 | 3.5.12 | 2026-06-28 | Per-market 30% limit, position cap $500, TierConfig Pydantic fix, `extra=allow`, dual-instance support, telegram alert stub |
 | 3.5.11 | 2026-06-28 | TierManager reads from config, dashboard dynamic version |
 | 3.5.10 | 2026-06-28 | Daemon watchdog (SignalCheck/CashCheck/ResourceCheck), admin endpoints |
