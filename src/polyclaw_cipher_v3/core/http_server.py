@@ -429,8 +429,8 @@ body {
   <div class="card" style="margin-bottom:14px" id="history-card">
     <div class="card-title" style="cursor:pointer" onclick="toggleHistoryPanel()">
       <span>📚 Trade History</span>
-      <span class="badge" id="history-total">0</span>
-      <span style="font-size:0.6rem;color:var(--muted);margin-left:8px" id="history-page-info">[click to expand]</span>
+      <span class="badge" id="history-total">…</span>
+      <span style="font-size:0.65rem;color:var(--muted);margin-left:8px" id="history-page-info">[click to expand]</span>
     </div>
     <div id="history-panel" style="display:none">
       <!-- Filter buttons -->
@@ -787,6 +787,24 @@ let historyTotalPages = 1;
 let historyFilter = 'all'; // 'all' | 'profit' | 'loss'
 let historyPanelOpen = false;
 let historyAllTrades = []; // cache for filtering
+let historyTotalCount = null; // cached total (fetched in background)
+
+// Fetch total trade count in background (cheap: limit=1) — updates badge even when panel collapsed
+async function fetchHistoryTotal() {
+  try {
+    const resp = await fetch('/api/trades?page=1&limit=1');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    historyTotalCount = data.total || 0;
+    // Only update badge if panel is closed (when open, loadHistoryPage handles it)
+    if (!historyPanelOpen) {
+      document.getElementById('history-total').textContent = historyTotalCount;
+      document.getElementById('history-page-info').textContent = '[click to expand]';
+    }
+  } catch (e) {
+    // Silent fail — don't spam console
+  }
+}
 
 async function toggleHistoryPanel() {
   const panel = document.getElementById('history-panel');
@@ -1001,6 +1019,9 @@ async function refresh() {
       // Only refresh if panel is open AND user is on page 1 with 'all' filter
       if (historyPanelOpen && historyPage === 1 && historyFilter === 'all') {
         loadHistoryPage(1, true);
+      } else if (!historyPanelOpen) {
+        // Panel collapsed: just refresh the total count badge (cheap)
+        fetchHistoryTotal();
       }
     } else {
       refreshFailCount++;
@@ -1012,8 +1033,9 @@ async function refresh() {
   }
 }
 
-// Initial load: fetch stats (trade history loads on panel expand)
+// Initial load: fetch stats + trade history total count
 refresh();
+fetchHistoryTotal();
 setInterval(refresh, REFRESH_MS);
 setInterval(() => {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString();
