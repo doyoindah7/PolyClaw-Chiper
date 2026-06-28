@@ -93,7 +93,7 @@ class HTTPServer:
         @self.app.get("/", response_class=HTMLResponse)
         async def dashboard():
             from .. import __version__ as ver
-            html = DASHBOARD_HTML.replace("v3.5.9", f"v{ver}")
+            html = DASHBOARD_HTML.replace("v3.5.9", f"v{ver}").replace("v3.5.15", f"v{ver}")
             return HTMLResponse(html)
 
         @self.app.get("/api/stats")
@@ -227,7 +227,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyClaw-Cipher v3.5.9 🔍</title>
+<title>PolyClaw-Cipher v3.5.15 🔍</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -375,7 +375,7 @@ body {
   <div id="alerts-container"></div>
   <div class="hdr">
     <div>
-      <h1>🔍 PolyClaw-Cipher v3.5.9</h1>
+      <h1>🔍 PolyClaw-Cipher v3.5.15</h1>
       <div class="sub">Paper Trading · auto-refresh 5s · <span id="refresh-status" style="color:var(--green)">connecting...</span> · updated <span id="last-update">--</span></div>
     </div>
     <div style="text-align:right">
