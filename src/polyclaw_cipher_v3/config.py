@@ -137,8 +137,16 @@ class MonitoringConfig(BaseModel):
     web: WebConfig = Field(default_factory=WebConfig)
 
 
+
+class TierConfig(BaseModel):
+    """v3.5.12 — Tier-based dynamic position sizing config."""
+    mode: str = "auto"
+    force_tier: int = Field(default=0, ge=0, le=4)
+    cooldown_hours: float = Field(default=24.0, ge=0.0)
+
 class BotConfig(BaseModel):
     bot: BotSettings = Field(default_factory=BotSettings)
+    tier: TierConfig = Field(default_factory=TierConfig)
     market: MarketSettings = Field(default_factory=MarketSettings)
     strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
