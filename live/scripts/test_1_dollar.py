@@ -128,9 +128,19 @@ def main() -> None:
         test_market = None
         for m in markets:
             if "clobTokenIds" in m and m.get("clobTokenIds"):
-                yes_price = float(m.get("outcomePrices", '["0.5","0.5"]'))
-                if isinstance(yes_price, list):
-                    yes_price = float(yes_price[0])
+                # Bug fix #2: outcomePrices is JSON string '["0.5","0.5"]', not float
+                # Parse JSON first, then extract first price
+                import json
+                prices_raw = m.get("outcomePrices", '["0.5","0.5"]')
+                if isinstance(prices_raw, str):
+                    prices = json.loads(prices_raw)
+                elif isinstance(prices_raw, list):
+                    prices = prices_raw
+                else:
+                    continue
+                if not prices:
+                    continue
+                yes_price = float(prices[0])
                 if 0.30 <= yes_price <= 0.70:
                     test_market = m
                     break

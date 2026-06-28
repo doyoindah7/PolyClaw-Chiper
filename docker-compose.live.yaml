@@ -16,8 +16,10 @@ services:
     volumes:
       # Live DB (separate from paper)
       - ./data_live:/app/data
-      # Live config (conservative params)
-      - ./live/config:/app/config:ro
+      # Config: mount existing config/ dir + overlay live.yaml as overlay file
+      # (Bug fix #1 + #3: don't replace entire /app/config — overlay instead)
+      - ./config:/app/config:ro
+      - ./live/config/live.yaml:/app/config/live.yaml:ro
       # Live module (wallet tools, executor, etc.)
       - ./live:/app/live:ro
     environment:
