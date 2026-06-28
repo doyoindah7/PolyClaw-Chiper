@@ -1,11 +1,15 @@
 # PolyClaw-Cipher v3.5.13 🔍
 
-> Momentum-driven Polymarket bot — aggressive compounding from micro capital ($10-$25)
+> Momentum-driven Polymarket bot — aggressive compounding from micro capital ($15-$25)
 
 **Repository:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
-**Version:** 3.5.13 (Live-realism Tier 1 — 6 simulations for paper→live parity — 2026-06-28)
-**Status:** RUNNING — 2 instances paper trading at http://3.107.53.103:8082/ + http://3.107.53.103:8083/
-**Bankroll:** $25 instance (Run 2 consistency test) | $10 instance (micro-cap growth validation)
+**Version:** 3.5.13 (Live-realism Tier 1 — 2026-06-28)
+**Architecture:** 2 paper instances + TG bot + live wallet ready
+- `polyclaw-cipher-v3` — $25 paper, port **8082**
+- `polyclaw-fifteen` — $15 paper (live-mirror config), port **8084**
+- `polyclaw-tg-bot` — Telegram bot @polyclawchiper_bot, command-only
+- Dashboard: http://3.107.53.103:8082/ + http://3.107.53.103:8084/
+- Live: wallet generated, pre-flight Stage 1 passed (8/8) ✅
 **TG Bot:** @polyclawchiper_bot — standalone container, dual-instance commands
 
 ---
@@ -19,14 +23,17 @@ cd PolyClaw-Chiper
 # Single instance ($25 bankroll)
 docker compose up --build -d
 
-# Or two instances ($25 + $10)
-docker compose up --build -d                    # $25 on port 8082
-docker compose -f docker-compose.ten.yaml up --build -d  # $10 on port 8083
+# $15 instance (live-mirror config, momentum-only)
+docker compose -f docker-compose.fifteen.yaml up --build -d
+
+# Live trading (requires funded wallet + preflight passed)
+# See live/README.md for full setup guide
+# docker compose -f docker-compose.live.yaml up --build -d
 
 # TG bot (standalone, 32MB RAM)
 docker compose -f docker-compose.tg.yaml up --build -d
 
-# Dashboard: http://<VPS_IP>:8082/  and  http://<VPS_IP>:8083/
+# Dashboard: http://<VPS_IP>:8082/  and  http://<VPS_IP>:8084/
 # Health:    curl http://localhost:8082/api/health
 ```
 
@@ -94,18 +101,18 @@ All simulations backward-compatible: set `slippage_model: fixed` or `on_chain_de
 - **IP:** 3.107.53.103
 - **Instances:**
   - Port 8082 — main ($25 bankroll, Run 2 consistency test)
-  - Port 8083 — micro ($10 bankroll, growth validation)
+  - Port 8084 — $15 (live-mirror config, momentum-only)
   - TG Bot — standalone container (`polyclaw-tg-bot`, 32MB RAM limit)
-- **Container names:** `polyclaw-cipher-v3`, `polyclaw-ten`, `polyclaw-tg-bot`
-- **RAM:** ~180MB total (both instances + TG bot)
+- **Container names:** `polyclaw-cipher-v3`, `polyclaw-fifteen`, `polyclaw-tg-bot`
+- **RAM:** ~250MB total (both instances + TG bot)
 
 ```bash
 # Start / Stop / Rebuild
 docker compose up -d
-docker compose -f docker-compose.ten.yaml up -d
+docker compose -f docker-compose.fifteen.yaml up -d
 docker compose -f docker-compose.tg.yaml up -d
 docker compose stop
-docker compose -f docker-compose.ten.yaml stop
+docker compose -f docker-compose.fifteen.yaml stop
 docker compose -f docker-compose.tg.yaml stop
 
 # Reset bankroll for new cycle (with analysis)
@@ -161,7 +168,8 @@ PolyClaw-Chiper/
 ├── HANDOFF_AUTOCRAW.md          # Guide for autoclaw AI agent
 ├── Dockerfile
 ├── docker-compose.yml           # Main instance ($25)
-├── docker-compose.ten.yaml      # Micro instance ($10)
+├── docker-compose.fifteen.yaml  # $15 instance (live-mirror config)
+├── docker-compose.live.yaml     # Live trading (requires funded wallet)
 ├── docker-compose.tg.yaml       # TG bot container (standalone)
 ├── pyproject.toml
 ├── .env.example
@@ -244,6 +252,6 @@ Full changelog: [CHANGELOG.md](CHANGELOG.md)
 
 - **Repository:** https://github.com/doyoindah7/PolyClaw-Chiper
 - **Dashboard (main):** http://3.107.53.103:8082/
-- **Dashboard (micro):** http://3.107.53.103:8083/
+- **Dashboard ($15):** http://3.107.53.103:8084/
 - **TG Bot:** @polyclawchiper_bot
 - **VPS:** 3.107.53.103 (AWS t2.small)

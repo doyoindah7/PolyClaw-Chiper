@@ -126,15 +126,15 @@ VPS (t2.small, 2GB RAM)
 │   ├── Config: default.yaml + paper.yaml
 │   ├── Data: /data/cipher_v3.db (Docker volume)
 │   ├── Bankroll: $25
-│   └── RAM: ~82MB
+│   └── RAM: ~130MB
 │
-├── polyclaw-ten (port 8083)
-│   ├── Config: default.yaml + ten.yaml + paper.yaml
-│   ├── Data: /data_ten/cipher_v3.db (separate volume)
-│   ├── Bankroll: $10
-│   └── RAM: ~64MB
+├── polyclaw-fifteen (port 8084)
+│   ├── Config: default.yaml + fifteen.yaml
+│   ├── Data: /app/data (separate volume)
+│   ├── Bankroll: $15
+│   └── RAM: ~90MB
 │
-└── Total RAM: ~730MB used / 1.9GB (1.2GB free)
+└── Total RAM: ~250MB used / 1.9GB
 ```
 
 Both instances share the same codebase and strategy config — only bankroll differs.
@@ -205,15 +205,15 @@ strategies:
 # Build & deploy both instances
 cd /home/ubuntu/polyclaw-cipher-v3
 docker compose up --build -d
-docker compose -f docker-compose.ten.yaml up --build -d
+docker compose -f docker-compose.fifteen.yaml up --build -d
 
 # Reset for new test cycle
 python3 scripts/archive_trades.py          # backup first
-# Stop container, edit DB wallet → $25, restart
+# Stop container, run full_reset.py, restart
 
 # Health check
 curl http://localhost:8082/api/health
-curl http://localhost:8083/api/health
+curl http://localhost:8084/api/health
 ```
 
 **VPS connection:**

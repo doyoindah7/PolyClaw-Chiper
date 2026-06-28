@@ -1,9 +1,0 @@
-# $10 instance override — same strategy config, lower bankroll
-risk:
-  initial_bankroll_usd: 10.0
-  sizer:
-    min_position_usd: 0.50
-
-monitoring:
-  web:
-    port: 8083
