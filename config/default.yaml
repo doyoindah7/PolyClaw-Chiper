@@ -157,12 +157,37 @@ risk:
 # === EXECUTION — Paper Trading ===
 execution:
   paper:
-    slippage_bps: 70  # v3.x LIVE-READY: real spread 50-150bps
-    fill_probability_base: 0.85
-    fill_probability_at_bid_low: 0.95
-    fill_probability_at_bid_high: 0.65
+    # === v3.5.13 LIVE-REALISM TIER 1 (autoclaw-reviewed parameters) ===
+    # Slippage: liquidity-based (function of notional / volume_24h)
+    slippage_model: "liquidity"        # "fixed" (legacy) | "liquidity" (recommended)
+    slippage_bps: 70                   # fallback when volume_24h unavailable
+    slippage_min_bps: 30               # very liquid markets (World Cup)
+    slippage_max_bps: 800              # very illiquid markets (politics minor)
+
+    # Fill probability: volatility-aware (autoclaw: 72% base, not 85%)
+    fill_probability_base: 0.72        # normal markets
+    fill_probability_volatile: 0.65    # sport/crypto (high vol, fast price move)
+    fill_probability_stable: 0.80      # economics/politics (low vol)
+    fill_probability_at_bid_low: 0.90
+    fill_probability_at_bid_high: 0.55
     queue_position_factor: 0.6
-    simulated_latency_sec: 0.2        # 200ms (NON-blocking, async)
+
+    # Latency: slightly faster (was 0.2s, now 0.15s — VPS already 1ms to PM)
+    simulated_latency_sec: 0.15
+
+    # On-chain settlement delay (Polygon block time)
+    on_chain_delay_sec: 3.0            # average block time
+    on_chain_delay_jitter: 2.0         # ±2s random (1-5s range)
+
+    # Gas fee model (Polygon, realistic avg + spike)
+    gas_fee_avg_usd: 0.01              # normal congestion
+    gas_fee_spike_probability: 0.05    # 5% chance of congestion spike
+    gas_fee_spike_usd: 0.10            # spike amount (NFT drop, big event)
+
+    # API rate limit simulation
+    api_rate_limit_per_sec: 10         # PM CLOB API limit
+    api_throttle_probability: 0.02     # 2% random throttle (network jitter)
+
 
 # === MONITORING ===
 monitoring:

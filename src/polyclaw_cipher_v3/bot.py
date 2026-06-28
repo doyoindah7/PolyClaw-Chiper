@@ -76,6 +76,11 @@ class PolyClawCipherV3:
 
         # Executor
         self.executor = PaperExecutor(self.config.get("execution", {}).get("paper", {}))
+        # v3.5.13: Wire callbacks for live-realism simulation
+        # - gas_fee_callback: deduct gas from wallet
+        # - on_position_confirmed: mark position as confirmed after on-chain delay
+        self.executor.gas_fee_callback = self._deduct_gas_fee
+        self.executor.on_position_confirmed = self._confirm_position
 
         # Alerts (stub)
         self.alerter = Alerter(self.config.get("monitoring", {}))
@@ -130,6 +135,12 @@ class PolyClawCipherV3:
         # v3.5.5 FIX (P1-05): Force-close stale/dead positions to free cash
         self.max_position_age_sec = self.config.get("risk", {}).get("max_position_age_sec", 1800)  # 30 min
         self.dead_position_age_sec = self.config.get("risk", {}).get("dead_position_age_sec", 900)  # 15 min
+        # v3.5.13: Position state sync — track PENDING positions (not yet on-chain confirmed)
+        # Position lifecycle: PENDING (submitted, awaiting block confirmation)
+        #                     → CONFIRMED (on-chain, can exit)
+        # Bot cannot exit PENDING positions — prevents "exit fails, position stuck" bug
+        self._pending_positions: set[str] = set()  # position IDs in PENDING state
+        self._total_gas_fees_paid: float = 0.0  # track cumulative gas for stats
         self._stats_task: asyncio.Task | None = None
 
     async def run(self) -> None:
@@ -366,10 +377,18 @@ class PolyClawCipherV3:
 
         try:
             # Execute (async, non-blocking)
-            pos = await self.executor.execute_entry(signal, market.question, self.wallet.bankroll)
+            # v3.5.13: Pass market_volume_24h for liquidity-based slippage
+            pos = await self.executor.execute_entry(
+                signal, market.question, self.wallet.bankroll,
+                market_volume_24h=getattr(market, 'volume_24h', 0.0),
+            )
             if pos is None:
                 await self.signal_repo.log_signal(signal, executed=False, rejected_reason="fill_rejected")
                 return
+
+            # v3.5.13: Mark position as PENDING (will be confirmed after on-chain delay)
+            # Position cannot be exited until confirmed — prevents "exit fails, position stuck" bug
+            self._pending_positions.add(pos.id)
 
             # v3.4.0 FIX (BUG-C2): Handle InsufficientFundsError from wallet.debit()
             # If concurrent signals drained cash, gracefully reject instead of crashing
@@ -383,6 +402,8 @@ class PolyClawCipherV3:
                 if sibling:
                     await self.position_repo.open_position(sibling)
                     await self.wallet.debit(sibling.invested)
+                    # v3.5.13: Mark sibling as PENDING too
+                    self._pending_positions.add(sibling.id)
                     # Register sibling entry in strategy
                     if hasattr(strat, "register_entry"):
                         # v3.5.11: Pass invested for fee-aware time exit
@@ -441,6 +462,11 @@ class PolyClawCipherV3:
         market_map = {m.condition_id: m for m in self._markets}
 
         for pos in positions[:]:
+            # v3.5.13: Skip PENDING positions — cannot exit until on-chain confirmed
+            # This prevents "exit fails, position stuck" bug in live trading
+            if self._is_position_pending(pos.id):
+                continue
+
             market = market_map.get(pos.market_condition_id)
 
             # v3.4.3 FIX: If market not in active scan, fetch from Gamma API
@@ -505,6 +531,32 @@ class PolyClawCipherV3:
                     logger.info("DEAD CLOSE: %s age=%.1fh entry=%.4f current=%.4f (no movement)",
                                 pos.id[:8], pos_age_sec/3600, pos.entry_price, current)
                     continue
+
+    # v3.5.13: Live-realism callback methods
+
+    def _deduct_gas_fee(self, amount: float) -> None:
+        """Deduct gas fee from wallet cash. Called by PaperExecutor."""
+        if amount > 0:
+            try:
+                self.wallet.cash -= amount
+                self._total_gas_fees_paid += amount
+                logger.debug("Gas fee deducted: $%.4f (total: $%.4f)",
+                             amount, self._total_gas_fees_paid)
+            except Exception as e:
+                logger.error("Gas fee deduction failed: %s", e)
+
+    def _confirm_position(self, pos_id: str) -> None:
+        """Mark position as confirmed after on-chain delay.
+
+        Called by PaperExecutor._confirm_position_after_delay() async task.
+        Removes position from _pending_positions set, allowing exit logic to proceed.
+        """
+        self._pending_positions.discard(pos_id)
+        logger.debug("Position %s confirmed (removed from pending set)", pos_id)
+
+    def _is_position_pending(self, pos_id: str) -> bool:
+        """Check if position is still pending (not yet on-chain confirmed)."""
+        return pos_id in self._pending_positions
 
     async def _close_position(self, pos: Position, trade, strat_name: str) -> None:
         """Close position: persist trade, update wallet, update risk.
