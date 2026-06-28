@@ -1,0 +1,21 @@
+services:
+  polyclaw-fifteen:
+    build:
+      context: .
+    container_name: polyclaw-fifteen
+    restart: unless-stopped
+    volumes:
+      - /home/ubuntu/polyclaw-cipher-v3/data_fifteen:/app/data
+      - /home/ubuntu/polyclaw-cipher-v3/config:/app/config:ro
+    environment:
+      - BOT_MODE=fifteen
+      - HTTP_PORT=8084
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+      - TG_DISABLE_POLL=true
+    ports:
+      - "8084:8084"
+
+networks:
+  polyclaw-fifteen_default:
+    driver: bridge
