@@ -58,6 +58,11 @@ docker compose -f docker-compose.tg.yaml up --build -d
 - **Duplicate trade detection** — zero tolerance
 - **Auto-archive** — DB backup + CSV export before every reset
 - **Trade analyzer** — `scripts/analyze_trades.py` learns from past runs, generates config recommendations for next cycle
+- **Auto-tune at startup** — bot reads latest trade archive on boot, analyzes performance, applies config changes in-memory automatically. No manual intervention needed.
+  - Analyzes: entry price sweet spots, optimal hold time, TP/SL from avg win/loss
+  - Applies: in-memory config override (does NOT modify config files)
+  - Logs: all changes printed to container logs with ⚙️ marker
+  - Threshold: requires 20+ trades in archive to tune (skips on first run)
 
 ### Live-Realism Simulations (v3.5.13 — Tier 1)
 Paper trading now simulates real-world execution friction for accurate live-readiness validation:
