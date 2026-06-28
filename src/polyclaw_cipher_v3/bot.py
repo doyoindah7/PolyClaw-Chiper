@@ -173,7 +173,7 @@ class PolyClawCipherV3:
         self._stats_task = asyncio.create_task(self._refresh_stats_loop(), name="stats_cache")
         # v3.5.5 FIX (P1-03): Periodic WAL checkpoint every 30 min to flush WAL file
         self._checkpoint_task = asyncio.create_task(self._checkpoint_loop(), name="wal_checkpoint")
-        if self.tg.enabled:
+        if self.tg.enabled and not os.environ.get("TG_DISABLE_POLL"):
             self._tg_task = asyncio.create_task(self._tg_poll_loop(), name="tg_poller")
 
         await self.alerter.notify_startup(

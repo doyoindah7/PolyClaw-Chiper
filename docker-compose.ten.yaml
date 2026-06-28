@@ -12,6 +12,9 @@ services:
     environment:
       - BOT_MODE=ten
       - HTTP_PORT=8083
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+      - TG_DISABLE_POLL=true
     ports:
       - "8083:8083"
 
