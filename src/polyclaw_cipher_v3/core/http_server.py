@@ -431,7 +431,10 @@ body {
   <div class="card" style="margin-bottom:14px" id="history-card">
     <div class="card-title" style="cursor:pointer" onclick="toggleHistoryPanel()">
       <span>📚 Trade History</span>
-      <span class="badge" id="history-total">…</span>
+      <span id="history-total-wrap" style="margin-left:8px;font-size:0.85rem;font-weight:700">
+        <span id="history-total" style="color:var(--blue);font-size:1.05rem;font-weight:800">…</span>
+        <span style="color:var(--muted);font-size:0.65rem;font-weight:500;margin-left:3px">total trades</span>
+      </span>
       <span style="font-size:0.65rem;color:var(--muted);margin-left:8px" id="history-page-info">[click to expand]</span>
     </div>
     <div id="history-panel" style="display:none">
