@@ -6,9 +6,9 @@ logger = logging.getLogger(__name__)
 
 TIER_CONFIGS = {
     1: {"label": "Aggressive Growth", "min_position_usd": 3.0, "max_pct_per_trade": 0.20, "max_open_positions": 10,
-        "tp_pct": 3.0, "sl_pct": 2.0, "description": "$25-$275"},
-    2: {"label": "Moderate Growth", "min_position_usd": 10.0, "max_pct_per_trade": 0.12, "max_open_positions": 8,
-        "tp_pct": 5.0, "sl_pct": 3.0, "description": "$275-$1,100"},
+        "tp_pct": 3.0, "sl_pct": 2.0, "description": "$25-$350"},
+    2: {"label": "Moderate Growth", "min_position_usd": 12.0, "max_pct_per_trade": 0.17, "max_open_positions": 8,
+        "tp_pct": 5.0, "sl_pct": 3.0, "description": "$350-$1,100"},
     3: {"label": "Capital Preservation", "min_position_usd": 30.0, "max_pct_per_trade": 0.06, "max_open_positions": 6,
         "tp_pct": 6.0, "sl_pct": 4.0, "description": "$1,100-$5,500"},
     4: {"label": "Stable Income", "min_position_usd": 100.0, "max_pct_per_trade": 0.03, "max_open_positions": 5,
@@ -16,7 +16,7 @@ TIER_CONFIGS = {
 }
 
 TIER_BOUNDARIES = {
-    1: {"enter_tier2": 275},
+    1: {"enter_tier2": 350},
     2: {"exit_tier1": 225, "enter_tier3": 1100},
     3: {"exit_tier2": 900, "enter_tier4": 5500},
     4: {"exit_tier3": 4500},

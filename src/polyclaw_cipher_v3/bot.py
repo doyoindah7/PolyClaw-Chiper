@@ -584,6 +584,17 @@ class PolyClawCipherV3:
         so Prometheus metrics and API don't show 0 before _refresh_stats_loop runs.
         """
         snap = self.wallet.snapshot()
+        
+        # v3.5.12: Auto-archive when micro-cap instance ($10) reaches $25 target
+        if (self.wallet.bankroll >= 25.0 and self.wallet.initial_bankroll <= 15.0 
+            and not getattr(self, "_auto_archived_at_25", False)):
+            self._auto_archived_at_25 = True
+            import subprocess
+            subprocess.run(["/usr/local/bin/python", "scripts/archive_trades.py"], 
+                         cwd="/app", capture_output=True)
+            logger.info("AUTO-ARCHIVE: Micro-cap BR=$%.2f (from $%.0f) reached $25 — trades saved",
+                       self.wallet.bankroll, self.wallet.initial_bankroll)
+        
         snap["mode"] = self.config.get("bot", {}).get("mode", "paper")
         from collections import Counter
         cat_counts = Counter(m.classify() for m in self._markets)
