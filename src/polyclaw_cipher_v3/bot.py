@@ -15,9 +15,13 @@ Wires together:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import sqlite3
 import time
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from .alerts import Alerter
@@ -169,6 +173,9 @@ class PolyClawCipherV3:
             logger.info("Restored state for %d open positions to strategies", len(open_positions))
         except Exception as e:
             logger.error("Failed to restore strategy states from DB: %s", e)
+
+        # v3.5.13: Auto-tune from history — analyze latest archive, apply in-memory
+        self._auto_tune_from_history()
 
         # Start services
         await self.binance_feed.start()
@@ -541,6 +548,163 @@ class PolyClawCipherV3:
                     continue
 
     # v3.5.13: Live-realism callback methods
+
+    def _auto_tune_from_history(self) -> None:
+        """v3.5.13: Auto-tune config from past trade archives.
+
+        Runs at startup. Reads latest archived DB, analyzes performance,
+        applies recommendations to momentum config IN-MEMORY (not to file).
+        Bot learns from every past cycle automatically.
+        """
+        try:
+            archive_dir = Path("data/trade_archive")
+            if not archive_dir.exists():
+                logger.info("Auto-tune: no archive directory — first run, skipping")
+                return
+
+            # Find latest archived DB
+            archives = sorted(archive_dir.glob("cipher_v3_*.db"), reverse=True)
+            if not archives:
+                logger.info("Auto-tune: no archives found — first run, skipping")
+                return
+
+            db_path = str(archives[0])
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+
+            # Load trades
+            try:
+                rows = db.execute("SELECT * FROM trades ORDER BY closed_at").fetchall()
+            except Exception:
+                logger.info("Auto-tune: no trades table in archive — skipping")
+                db.close()
+                return
+            db.close()
+
+            if len(rows) < 20:
+                logger.info("Auto-tune: only %d trades in archive — need 20+ for tuning", len(rows))
+                return
+
+            trades = [dict(r) for r in rows]
+            total = len(trades)
+            wins = [t for t in trades if t["pnl_dollar"] > 0]
+            losses = [t for t in trades if t["pnl_dollar"] <= 0]
+            wr = len(wins) / total * 100 if total > 0 else 0
+            total_pnl = sum(t["pnl_dollar"] for t in trades)
+
+            logger.info("Auto-tune: analyzing %d trades from %s (WR=%.1f%%, PnL=$%.2f)",
+                        total, archives[0].name, wr, total_pnl)
+
+            # --- 1. Entry price analysis ---
+            price_buckets = defaultdict(lambda: {"trades": 0, "pnl": 0.0})
+            for t in trades:
+                bucket = round(t["entry_price"] * 10) / 10
+                b = f"{bucket:.1f}-{bucket+0.1:.1f}"
+                price_buckets[b]["trades"] += 1
+                price_buckets[b]["pnl"] += t["pnl_dollar"]
+
+            best_price = max(price_buckets.items(), key=lambda x: x[1]["pnl"])
+            best_price_lo = float(best_price[0].split("-")[0])
+            best_price_hi = float(best_price[0].split("-")[1])
+
+            # --- 2. Hold time analysis ---
+            hold_buckets = defaultdict(lambda: {"trades": 0, "pnl": 0.0})
+            for t in trades:
+                hold_sec = t["closed_at"] - t["opened_at"]
+                if hold_sec < 60:
+                    b = "0-1min"
+                elif hold_sec < 180:
+                    b = "1-3min"
+                elif hold_sec < 300:
+                    b = "3-5min"
+                elif hold_sec < 600:
+                    b = "5-10min"
+                else:
+                    b = "10min+"
+                hold_buckets[b]["trades"] += 1
+                hold_buckets[b]["pnl"] += t["pnl_dollar"]
+
+            best_hold = max(hold_buckets.items(), key=lambda x: x[1]["pnl"])
+            hold_map = {"0-1min": 60, "1-3min": 180, "3-5min": 300, "5-10min": 600, "10min+": 1800}
+            recommended_hold = hold_map.get(best_hold[0], 300)
+
+            # --- 3. TP/SL analysis ---
+            avg_win = sum(t["pnl_dollar"] for t in wins) / len(wins) if wins else 0
+            avg_loss = abs(sum(t["pnl_dollar"] for t in losses) / len(losses)) if losses else 0
+            avg_win_invest = sum(t["invested"] for t in wins) / len(wins) if wins else 1
+            avg_loss_invest = sum(t["invested"] for t in losses) / len(losses) if losses else 1
+            avg_win_pct = avg_win / avg_win_invest * 100 if avg_win_invest > 0 else 0
+            avg_loss_pct = avg_loss / avg_loss_invest * 100 if avg_loss_invest > 0 else 0
+            recommended_tp = round(avg_win_pct * 0.9, 1) if avg_win_pct > 0 else 8.0
+            recommended_sl = round(avg_loss_pct * 1.2, 1) if avg_loss_pct > 0 else 4.0
+
+            # --- Apply to momentum config in-memory ---
+            s_conf = self.config.get("strategies", {}).get("momentum", {})
+            changes = []
+
+            # Entry price: only adjust if difference > 0.05
+            cur_min = s_conf.get("min_entry_price", 0.10)
+            cur_max = s_conf.get("max_entry_price", 0.95)
+            if abs(best_price_lo - cur_min) > 0.05 and best_price[1]["trades"] >= 5:
+                s_conf["min_entry_price"] = best_price_lo
+                changes.append(f"min_entry_price: {cur_min} → {best_price_lo}")
+            if abs(best_price_hi - cur_max) > 0.05 and best_price[1]["trades"] >= 5:
+                s_conf["max_entry_price"] = best_price_hi
+                changes.append(f"max_entry_price: {cur_max} → {best_price_hi}")
+
+            # Hold time: only adjust if difference > 60s
+            cur_hold = s_conf.get("max_hold_sec", 300)
+            if abs(recommended_hold - cur_hold) > 60:
+                s_conf["max_hold_sec"] = recommended_hold
+                changes.append(f"max_hold_sec: {cur_hold} → {recommended_hold}")
+
+            # TP/SL: only adjust if meaningful difference
+            cur_tp = s_conf.get("take_profit_pct", 8.0)
+            cur_sl = s_conf.get("stop_loss_pct", 4.0)
+            if abs(recommended_tp - cur_tp) > 1.0:
+                s_conf["take_profit_pct"] = recommended_tp
+                changes.append(f"take_profit_pct: {cur_tp} → {recommended_tp}")
+            if abs(recommended_sl - cur_sl) > 0.5:
+                s_conf["stop_loss_pct"] = recommended_sl
+                changes.append(f"stop_loss_pct: {cur_sl} → {recommended_sl}")
+
+            # Update strategy objects with new config
+            for strat in self.strategies:
+                if strat.name == "momentum":
+                    if hasattr(strat, "take_profit_pct"):
+                        strat.take_profit_pct = s_conf.get("take_profit_pct", strat.take_profit_pct)
+                    if hasattr(strat, "stop_loss_pct"):
+                        strat.stop_loss_pct = s_conf.get("stop_loss_pct", strat.stop_loss_pct)
+                    if hasattr(strat, "max_hold_sec"):
+                        strat.max_hold_sec = s_conf.get("max_hold_sec", strat.max_hold_sec)
+                    if hasattr(strat, "min_entry_price"):
+                        strat.min_entry_price = s_conf.get("min_entry_price", strat.min_entry_price)
+                    if hasattr(strat, "max_entry_price"):
+                        strat.max_entry_price = s_conf.get("max_entry_price", strat.max_entry_price)
+
+            if changes:
+                logger.info("Auto-tune: applied %d changes from %d past trades:", len(changes), total)
+                for c in changes:
+                    logger.info("  ⚙️ %s", c)
+            else:
+                logger.info("Auto-tune: current config is optimal (no changes needed)")
+
+            # Store analysis summary for stats API
+            self._auto_tune_summary = {
+                "source_archive": archives[0].name,
+                "trades_analyzed": total,
+                "win_rate": round(wr, 1),
+                "total_pnl": round(total_pnl, 2),
+                "changes_applied": changes,
+                "best_entry_bucket": best_price[0],
+                "best_hold_bucket": best_hold[0],
+                "recommended_tp": recommended_tp,
+                "recommended_sl": recommended_sl,
+            }
+
+        except Exception as e:
+            logger.error("Auto-tune failed (non-fatal): %s", e)
+            self._auto_tune_summary = {"error": str(e)}
 
     def _deduct_gas_fee(self, amount: float) -> None:
         """Deduct gas fee from wallet cash. Called by PaperExecutor."""
