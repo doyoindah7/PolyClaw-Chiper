@@ -21,10 +21,13 @@ class CompoundingSizer:
     """
 
     def __init__(self, config: dict[str, Any] | None = None, tier_manager=None):
+        self.tier_manager = tier_manager
         c = config or {}
         self.cash_min_pct = c.get("cash_min_pct", 15)  # v3.3.0: 10→15
         self.max_pct_per_trade = c.get("max_pct_per_trade", 0.65)  # v3.3.0: ceiling only
         self.min_position_usd = c.get("min_position_usd", 2.0)
+        # v3.5.12: Absolute position cap for realistic simulation
+        self.max_absolute_position = c.get("max_absolute_position", 500.0)
         # Confidence scaling: low conf = 0.6x, high conf = 1.3x
         self.confidence_min_mult = c.get("confidence_min_mult", 0.6)
         self.confidence_max_mult = c.get("confidence_max_mult", 1.3)
@@ -108,6 +111,12 @@ class CompoundingSizer:
         notional = min(notional, bankroll * strategy_max_pct)  # PRIMARY cap
         notional = min(notional, bankroll * self.max_pct_per_trade)  # Safety ceiling
         notional = min(notional, cash * 0.95)  # Always leave 5% buffer
+
+        # v3.5.12: Absolute position cap — prevent unrealistic size explosion
+        # At large bankrolls (>$5k), Tier 1 20% positions become impossible to fill live
+        # This caps the notional at a realistic maximum for Polymarket liquidity
+        if self.max_absolute_position > 0:
+            notional = min(notional, self.max_absolute_position)
 
         # Hard floor
         if notional < self.min_position_usd:

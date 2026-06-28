@@ -101,6 +101,20 @@ class MomentumStrategy(BaseStrategy):
             self._dbg_max_pos += 1
             return None
 
+        # v3.5.12: Per-market concentration limit — prevent >30% bankroll in one market
+        # Check total invested across ALL open positions (not just this strategy)
+        total_invested_in_market = sum(
+            p.invested for p in open_positions
+            if getattr(p, 'market_condition_id', None) == market.condition_id
+        )
+        # Estimate: if we open this trade, what % of bankroll goes to this market?
+        # Use conservative estimate: assume notional ~= bankroll * strategy_cap_pct / max(1, free_slots)
+        bankroll = context.get("bankroll", 25.0)
+        estimated_notional = bankroll * 0.10  # rough: ~10% per trade on average
+        if bankroll > 0 and (total_invested_in_market + estimated_notional) > bankroll * self.max_per_market_pct:
+            self._dbg_one_per_mkt += 1
+            return None
+
         # One per market
         if any(p.market_condition_id == market.condition_id for p in my_positions):
             self._dbg_one_per_mkt += 1
