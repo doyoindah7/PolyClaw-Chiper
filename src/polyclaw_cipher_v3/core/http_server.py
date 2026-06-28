@@ -92,7 +92,9 @@ class HTTPServer:
 
         @self.app.get("/", response_class=HTMLResponse)
         async def dashboard():
-            return DASHBOARD_HTML
+            from .. import __version__ as ver
+            html = DASHBOARD_HTML.replace("v3.5.9", f"v{ver}")
+            return HTMLResponse(html)
 
         @self.app.get("/api/stats")
         async def stats():
