@@ -1,0 +1,18 @@
+{
+  "archive_ts": "20260628_005124",
+  "trades_total": 273,
+  "signals_total": 356,
+  "per_strategy": {
+    "atomic_arb": {
+      "trades": 22,
+      "pnl": 54.24,
+      "wr": 50.0
+    },
+    "momentum": {
+      "trades": 251,
+      "pnl": 287.6,
+      "wr": 70.5
+    }
+  },
+  "db_path": "/home/ubuntu/polyclaw-cipher-v3/data/trade_archive/cipher_v3_20260628_005124.db"
+}
