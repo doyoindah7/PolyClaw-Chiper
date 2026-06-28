@@ -431,15 +431,31 @@ class PaperExecutor(BaseExecutor):
         )
         return trade
 
-    async def close_position(self, pos: Position, exit_price: float, reason: str) -> Trade:
-        """Close position at given price (TP/SL/max hold)."""
+    async def close_position(self, pos: Position, exit_price: float, reason: str,
+                             market_volume_24h: float = 0.0) -> Trade:
+        """Close position at given price (TP/SL/max hold).
+
+        v3.5.13 FIX: Exit slippage now calculated using liquidity-based model.
+        If market_volume_24h not available, uses moderate 100 bps default
+        (exit during reversal = worse slippage than entry).
+        """
         # v3.5.13: Gas fee for exit
         gas_exit = self._simulate_gas_fee(num_legs=1)
         self._deduct_gas_fee(gas_exit)
 
-        # v3.5.13: Exit slippage (same liquidity-based model)
-        # We don't have market_volume_24h here, use a moderate default
-        exit_price = max(0.01, min(0.99, exit_price))
+        # v3.5.13 FIX: Exit slippage — liquidity-based (was 0, unrealistic)
+        # Exit slippage moves price AGAINST you (exit during reversal)
+        if market_volume_24h > 0:
+            slip_bps = self._calc_slippage_bps(pos.invested, market_volume_24h)
+        else:
+            slip_bps = 100  # moderate default for exit without volume data
+        slip = slip_bps / 10000.0
+        # Exit: price moves AGAINST position (sell lower for YES, buy higher for NO)
+        if pos.side == Side.YES:
+            exit_price = exit_price * (1 - slip)
+        else:
+            exit_price = exit_price * (1 + slip)
+        exit_price = round(max(0.01, min(0.99, exit_price)), 4)
         exit_value = pos.shares * exit_price
         pnl = exit_value - pos.invested
         pnl_pct = (pnl / pos.invested) * 100 if pos.invested > 0 else 0.0

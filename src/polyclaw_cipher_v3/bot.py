@@ -464,8 +464,13 @@ class PolyClawCipherV3:
         for pos in positions[:]:
             # v3.5.13: Skip PENDING positions — cannot exit until on-chain confirmed
             # This prevents "exit fails, position stuck" bug in live trading
+            # v3.5.13 FIX: Auto-confirm if pending > 10s (safety net for failed asyncio tasks)
             if self._is_position_pending(pos.id):
-                continue
+                if time.time() - pos.opened_at > 10:
+                    self._pending_positions.discard(pos.id)
+                    logger.warning("Position %s auto-confirmed (PENDING > 10s safety timeout)", pos.id[:8])
+                else:
+                    continue
 
             market = market_map.get(pos.market_condition_id)
 
@@ -498,7 +503,8 @@ class PolyClawCipherV3:
                 if current > 0:
                     should_exit, exit_reason = strat.check_exit(pos.id, pos.market_condition_id, current)
                     if should_exit:
-                        trade = await self.executor.close_position(pos, current, exit_reason)
+                        trade = await self.executor.close_position(pos, current, exit_reason,
+                                                                     market_volume_24h=market.volume_24h if market else 0)
                         await self._close_position(pos, trade, strat_name=pos.strategy)
 
             # v3.5.5 FIX (P1-05): Force-close stale positions to free cash.
@@ -516,7 +522,8 @@ class PolyClawCipherV3:
                 current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
                 if current <= 0:
                     current = pos.entry_price
-                trade = await self.executor.close_position(pos, current, "Force-close stale ({:.1f}h)".format(pos_age_sec/3600))
+                trade = await self.executor.close_position(pos, current, "Force-close stale ({:.1f}h)".format(pos_age_sec/3600),
+                                                             market_volume_24h=market.volume_24h if market else 0)
                 await self._close_position(pos, trade, strat_name=pos.strategy)
                 logger.info("STALE CLOSE: %s age=%.1fh price=%.4f", pos.id[:8], pos_age_sec/3600, current)
                 continue  # Skip further processing since position was closed
@@ -526,7 +533,8 @@ class PolyClawCipherV3:
                 # (entry_price == current_price means no movement, likely nearly-resolved)
                 current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
                 if current > 0 and abs(current - pos.entry_price) < 0.001:
-                    trade = await self.executor.close_position(pos, current, "Force-close dead (0% PnL, {:.1f}h)".format(pos_age_sec/3600))
+                    trade = await self.executor.close_position(pos, current, "Force-close dead (0% PnL, {:.1f}h)".format(pos_age_sec/3600),
+                                                                 market_volume_24h=market.volume_24h if market else 0)
                     await self._close_position(pos, trade, strat_name=pos.strategy)
                     logger.info("DEAD CLOSE: %s age=%.1fh entry=%.4f current=%.4f (no movement)",
                                 pos.id[:8], pos_age_sec/3600, pos.entry_price, current)
