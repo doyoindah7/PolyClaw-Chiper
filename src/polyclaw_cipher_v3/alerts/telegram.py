@@ -102,5 +102,15 @@ class TelegramAlerter(Alerter):
     async def notify_crash(self, error: str) -> None:
         self._send(f"🚨 *Bot Crash*\n{error[:200]}")
 
+
+    async def notify_tier_up(self, old_tier: int, new_tier: int, bankroll: float) -> None:
+        """Alert on tier transition (important!)."""
+        emoji = "🎯" if new_tier >= 2 else "📈"
+        self._send(
+            f"{emoji} <b>Tier UP: {old_tier} → {new_tier}</b>\n"
+            f"💰 Bankroll: ${bankroll:.2f}\n"
+            f"🌐 <a href='http://3.107.53.103:8082/'>Dashboard</a>"
+        )
+
     async def close(self) -> None:
         pass
