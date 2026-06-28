@@ -1,4 +1,10 @@
-"""Auto-healing daemon v3.5.14 — monitors bot process, restarts on crash. 24/7 reliable.
+"""Auto-healing daemon v3.5.15 — monitors bot process, restarts on crash. 24/7 reliable.
+
+v3.5.15 fixes:
+- check_signal_starvation now uses /api/stats (db_stats returns 403)
+- Configurable thresholds via env vars: STAGNATION_THRESHOLD_MIN, STAGNATION_CHECK_INTERVAL
+- Execution failure alert: 20+ signals, 0 trades, 0 open positions
+- Container memory check uses dynamic container name
 
 v3.5.14 fixes:
 - CLOB WS data freshness check (last_msg_age_sec > 120 = stale → restart)
@@ -159,9 +165,9 @@ class StagnationDetector:
 
     def record(self, stats: dict) -> None:
         now = time.time()
-        # v3.5.14: Fixed field names to match actual API response
+        # v3.5.15: Fixed field name — API returns 'trades' not 'total_trades'
         bankroll = stats.get("bankroll", 0)
-        total_trades = stats.get("total_trades", 0)
+        total_trades = stats.get("trades", 0)
         # Sum signals across all strategies
         total_signals = 0
         for s in stats.get("strategies", []):
@@ -179,34 +185,50 @@ class StagnationDetector:
     def is_stagnant(self, stats: dict, threshold_min: int = 15) -> tuple[bool, str]:
         now = time.time()
         threshold = threshold_min * 60
-
-        # Open positions guard
-        open_positions = stats.get("open_positions", [])
-        if len(open_positions) > 0:
-            return False, f"OK (have {len(open_positions)} open positions)"
+        signal_threshold = max(threshold * 3, 300)  # 3x threshold or min 5 min
 
         for key in self.history:
             if len(self.history[key]) < 3:
                 return False, "insufficient data"
 
+        def _find_oldest_within(hist: list, window_sec: float) -> tuple[float, float] | None:
+            """Find the oldest entry within window_sec from the latest entry."""
+            if not hist:
+                return None
+            latest_ts = hist[-1][0]
+            cutoff = latest_ts - window_sec
+            # Find first entry at or after cutoff
+            for ts, val in hist:
+                if ts >= cutoff:
+                    return (ts, val)
+            return hist[0]  # fallback to oldest
+
+        open_positions = stats.get("open_positions", [])
+        has_open = len(open_positions) > 0
+
         # Check 1: Bankroll unchanged for threshold_min
         br_hist = self.history["bankroll"]
-        if br_hist[-1][0] - br_hist[0][0] >= threshold:
-            if abs(br_hist[-1][1] - br_hist[0][1]) < 0.01:
+        br_old = _find_oldest_within(br_hist, threshold)
+        if br_old and not has_open:
+            if abs(br_hist[-1][1] - br_old[1]) < 0.01:
                 return True, f"Bankroll unchanged for {threshold_min}m (stuck at ${br_hist[-1][1]:.2f})"
 
         # Check 2: No new trades for threshold_min (when bankroll > $30)
         bankroll = stats.get("bankroll", 0)
         tr_hist = self.history["trades"]
-        if bankroll > 30 and tr_hist[-1][0] - tr_hist[0][0] >= threshold:
-            if tr_hist[-1][1] == tr_hist[0][1]:
+        tr_old = _find_oldest_within(tr_hist, threshold)
+        if tr_old and bankroll > 30:
+            if tr_hist[-1][1] == tr_old[1]:
+                if has_open:
+                    return True, f"No new trades for {threshold_min}m with {len(open_positions)} stuck open positions"
                 return True, f"No new trades for {threshold_min}m (trades stuck at {int(tr_hist[-1][1])})"
 
-        # Check 3: No new signals for 10 min
+        # Check 3: No new signals for signal_threshold
         sig_hist = self.history["signals"]
-        if sig_hist[-1][0] - sig_hist[0][0] >= 600:
-            if sig_hist[-1][1] == sig_hist[0][1]:
-                return True, "No new signals for 10m and no open positions (strategies may be dead)"
+        sig_old = _find_oldest_within(sig_hist, signal_threshold)
+        if sig_old:
+            if sig_hist[-1][1] == sig_old[1]:
+                return True, f"No new signals for {signal_threshold//60}m (strategies may be dead)"
 
         # Check 4: All strategies disabled
         disabled = stats.get("risk", {}).get("disabled_strategies", [])
@@ -218,6 +240,8 @@ class StagnationDetector:
         if markets == 0:
             return True, "0 markets tracked (scanner dead?)"
 
+        if has_open:
+            return False, f"OK (have {len(open_positions)} open positions, signals flowing)"
         return False, "OK"
 
     def should_restart(self, stats: dict, threshold_min: int = 15) -> tuple[bool, str]:
@@ -308,37 +332,55 @@ def run_bot() -> subprocess.Popen:
 # ── Watchdog Checks ──────────────────────────────────────────────────────
 
 def check_signal_starvation(host: str, port: int) -> None:
-    """Check signal starvation + execution failure."""
+    """v3.5.15: Check signal starvation + execution failure via /api/stats (db_stats returns 403)."""
     import urllib.request
     try:
-        url = f"http://{host}:{port}/api/admin/db_stats?hours=1"
+        url = f"http://{host}:{port}/api/stats"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=5.0) as resp:
-            data = json.loads(resp.read().decode())
+            stats = json.loads(resp.read().decode())
 
-        signals = data.get("signals", {})
-        total_signals = signals.get("total", 0)
-        rejected_signals = signals.get("rejected", 0)
-        rejection_rate = signals.get("rejection_rate", 0.0)
-        per_strategy = signals.get("per_strategy", {})
-        trades_closed = data.get("trades", {}).get("closed", 0)
+        # Extract signal/trade data from stats
+        total_signals = 0
+        per_strategy = {}
+        for s in stats.get("strategies", []):
+            if isinstance(s, dict):
+                n = s.get("signals_emitted", 0)
+                name = s.get("name", "unknown")
+                per_strategy[name] = n
+                total_signals += n
 
+        total_trades = stats.get("trades", 0)
+        open_positions = stats.get("open_positions", [])
+
+        # Per-strategy starvation check
         for strat in ["momentum", "atomic_arb", "latency_arb", "resolution_snipe"]:
             n = per_strategy.get(strat, 0)
             if n == 0:
-                logger.info("SignalCheck: %s emitted 0 signals in last 1h", strat)
+                logger.info("SignalCheck: %s emitted 0 signals this session", strat)
 
-        if total_signals > 5 and rejection_rate > 0.7:
-            logger.error("SignalCheck: HIGH rejection rate %d/%d (%.0f%%)",
-                        rejected_signals, total_signals, rejection_rate * 100)
-            send_tg_alert("high_rejection",
-                f"⚠️ High signal rejection rate: {rejected_signals}/{total_signals} ({rejection_rate*100:.0f}%)\nPort: {port}\nRisk gate may be too tight.",
+        # Execution failure: signals increasing but trades not increasing
+        # v3.5.15: Track delta signals vs delta trades (not absolute 0)
+        # If 20+ new signals but 0 new trades and 0 open positions → execution broken
+        if not hasattr(check_signal_starvation, '_last_signals'):
+            check_signal_starvation._last_signals = total_signals
+            check_signal_starvation._last_trades = total_trades
+        delta_signals = total_signals - check_signal_starvation._last_signals
+        delta_trades = total_trades - check_signal_starvation._last_trades
+        check_signal_starvation._last_signals = total_signals
+        check_signal_starvation._last_trades = total_trades
+
+        if delta_signals > 20 and delta_trades == 0 and len(open_positions) == 0:
+            logger.error("SignalCheck: %d new signals but 0 new trades — execution issue?", delta_signals)
+            send_tg_alert("execution_failure",
+                f"🚨 Execution issue: {delta_signals} new signals, 0 new trades, 0 open positions\nPort: {port}\nRisk gate may be blocking all trades.",
                 cooldown_sec=600)
 
-        if total_signals > 10 and trades_closed == 0:
-            logger.error("SignalCheck: %d signals but 0 trades closed — execution issue?", total_signals)
-            send_tg_alert("execution_failure",
-                f"🚨 Execution pipeline issue: {total_signals} signals fired but 0 trades closed in 1h\nPort: {port}",
+        # High rejection proxy: if 50+ new signals but 0 new trades, likely high rejection
+        if delta_signals > 50 and delta_trades == 0:
+            logger.warning("SignalCheck: %d new signals, 0 new trades — check risk config", delta_signals)
+            send_tg_alert("high_rejection",
+                f"⚠️ Signal/trade imbalance: {delta_signals} new signals, 0 new trades\nPort: {port}\nRisk gate may be too tight.",
                 cooldown_sec=600)
 
     except Exception as e:
@@ -408,10 +450,11 @@ def check_resources(host: str, port: int) -> None:
     elif disk_pct > 0.85:
         logger.warning("ResourceCheck: Disk high %.1f%%", disk_pct * 100)
 
-    # Container memory
+    # Container memory (v3.5.15: dynamic container name)
+    container_name = os.environ.get("CONTAINER_NAME", "polyclaw-cipher-v3")
     try:
         result = sp.run(
-            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", "polyclaw-cipher-v3"],
+            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container_name],
             capture_output=True, text=True, timeout=5.0,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -454,10 +497,13 @@ def main() -> None:
     deep_check_interval = 60
     last_deep_check = 0.0
     stagnation_detector = StagnationDetector()
-    stagnation_check_interval = 120
     last_stagnation_check = 0.0
-    watchdog_check_interval = 60
     last_watchdog_check = 0.0
+
+    # v3.5.15: Configurable thresholds via env vars (for testing)
+    stagnation_threshold = int(os.environ.get("STAGNATION_THRESHOLD_MIN", "15"))
+    stagnation_check_interval = int(os.environ.get("STAGNATION_CHECK_INTERVAL", "120"))
+    watchdog_check_interval = int(os.environ.get("WATCHDOG_CHECK_INTERVAL", "60"))
 
     # v3.5.14: CLOB error tracker
     clob_error_tracker = CLOBErrorTracker(max_errors=15, window_sec=300)
@@ -466,8 +512,9 @@ def main() -> None:
 
     bot_label = os.environ.get("BOT_LABEL", f"port-{port}")
 
-    logger.info("Daemon v3.5.14 started — bot port=%d, label=%s", port, bot_label)
+    logger.info("Daemon v3.5.15 started — bot port=%d, label=%s", port, bot_label)
     logger.info("TG alerts: %s", "ENABLED" if TG_BOT_TOKEN else "DISABLED (no token)")
+    logger.info("Stagnation threshold: %dm, check interval: %ds", stagnation_threshold, stagnation_check_interval)
 
     send_tg_alert("daemon_start",
         f"✅ Daemon started for {bot_label} (port {port})\nMonitoring active: CLOB WS, stagnation, signals, resources",
@@ -546,7 +593,7 @@ def main() -> None:
                     with urllib.request.urlopen(req, timeout=5.0) as resp:
                         stats = json.loads(resp.read().decode())
                     stagnation_detector.record(stats)
-                    should_restart, reason = stagnation_detector.should_restart(stats, threshold_min=15)
+                    should_restart, reason = stagnation_detector.should_restart(stats, threshold_min=stagnation_threshold)
                     if should_restart:
                         logger.error("STAGNATION DETECTED: %s — restarting bot", reason)
                         send_tg_alert("stagnation",
