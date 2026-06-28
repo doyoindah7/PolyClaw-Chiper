@@ -619,8 +619,8 @@ class PolyClawCipherV3:
             )
             if len(sorted_prices) >= 3:
                 top3 = sorted_prices[:3]
-                all_los = [float(b[0].split("-")[0]) for b, _ in top3]
-                all_his = [float(b[0].split("-")[1]) for b, _ in top3]
+                all_los = [float(b.split("-")[0]) for b, _ in top3]
+                all_his = [float(b.split("-")[1]) for b, _ in top3]
                 best_price_lo = min(all_los)
                 best_price_hi = max(all_his)
                 best_price_label = f"{best_price_lo:.1f}-{best_price_hi:.1f}"
