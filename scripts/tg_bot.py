@@ -196,6 +196,7 @@ def cmd_dashboard():
 COMMANDS = {
     "/start": cmd_start,
     "/help": cmd_start,
+    "/menu": cmd_start,
     "/status": cmd_status,
     "/positions": cmd_positions,
     "/trades": cmd_trades,
