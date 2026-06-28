@@ -71,7 +71,7 @@ class PolyClawCipherV3:
 
         # Risk + Sizer
         self.risk = RiskManager(self.config.get("risk", {}))
-        self._tier_manager = TierManager(force_tier=0)
+        self._tier_manager = TierManager(force_tier=self.config.get("risk", {}).get("tier", {}).get("force_tier", 0))
         self.sizer = CompoundingSizer(self.config.get("risk", {}).get("sizer", {}), tier_manager=self._tier_manager)
 
         # Executor
