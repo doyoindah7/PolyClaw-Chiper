@@ -474,7 +474,7 @@ def main() -> None:
     # v3.5.7: Lightweight watchdog checks (every 60s)
     watchdog_check_interval = 60
 
-    logger.info("Daemon v3.5.7 started — bot port=%d (deep health check via %s)", port, health_host)
+    logger.info("Daemon v3.5.12 started — bot port=%d (deep health check via %s)", port, health_host)
     logger.info("Crash loop threshold: %d/hour → switch to %ds intervals (never give up)",
                 crash_loop_threshold, long_interval)
     logger.info("Watchdog checks every %ds: signal_starvation, cash_deployment, resources",
