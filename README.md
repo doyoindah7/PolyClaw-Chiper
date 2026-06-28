@@ -1,108 +1,100 @@
-# PolyClaw-Cipher v3.5.5 🔍
+# PolyClaw-Cipher v3.5.12 🔍
 
-> HFT-capable Polymarket bot with AI agent — aggressive compounding for small capital ($25+)
+> Momentum-driven Polymarket bot — aggressive compounding from micro capital ($10-$25)
 
 **Repository:** https://github.com/doyoindah7/PolyClaw-Chiper (private)
-**Version:** 3.5.5 (Super Z audit fixes — 2026-06-28)
-**Status:** RUNNING (paper trading, deployed at http://3.107.53.103:8082/)
-**Bankroll:** $59.47 (+137.9% from $25 initial)
+**Version:** 3.5.12 (Per-market exposure limits + Tier-based sizing + Pydantic schema fixes — 2026-06-28)
+**Status:** RUNNING — 2 instances paper trading at http://3.107.53.103:8082/ + http://3.107.53.103:8083/
+**Bankroll:** $25 instance (Run 2 consistency test) | $10 instance (micro-cap growth validation)
 
 ---
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/doyoindah7/PolyClaw-Chiper.git
 cd PolyClaw-Chiper
 
-# Setup
-cp .env.example .env
+# Single instance ($25 bankroll)
+docker compose up --build -d
 
-# Build & deploy
-docker-compose up --build -d
+# Or two instances ($25 + $10)
+docker compose up --build -d                    # $25 on port 8082
+docker compose -f docker-compose.ten.yaml up --build -d  # $10 on port 8083
 
-# Dashboard (5s after start)
-# http://<VPS_IP>:8082/
-
-# Check health
-curl http://localhost:8082/api/health
-# {"status":"ok","version":"3.4.3","uptime_sec":...}
-
-# View logs
-docker logs -f polyclaw-cipher-v3
+# Dashboard: http://<VPS_IP>:8082/  and  http://<VPS_IP>:8083/
+# Health:    curl http://localhost:8082/api/health
 ```
 
 ---
 
 ## Features
 
-### Core Architecture
-- **WebSocket CLOB feed** — real-time Polymarket orderbook (60x faster than REST polling)
-- **WebSocket Binance feed** — BTC/ETH/SOL real-time prices + dynamic volatility
-- **Event-driven architecture** — in-process pub/sub event bus
-- **Real resolution detection** — uses `closed` field + price-based winner detection
-- **Async paper executor** — non-blocking, with leg-delay simulation for atomic_arb
-- **SQLite WAL state** — atomic, queryable, async
+### Core Architecture (v3.5.12)
+- **WebSocket CLOB feed** — real-time Polymarket orderbook (134 tokens tracked)
+- **WebSocket Binance feed** — BTC/ETH/SOL real-time prices
+- **Async paper executor** — non-blocking, 70bps slippage simulation
+- **SQLite WAL state** — atomic, dual-instance isolated DBs
 - **FastAPI HTTP server** — dashboard + REST API + Prometheus metrics
-- **JSON structured logs** — via structlog
-- **Daemon 24/7** — exponential backoff, deep health check, never gives up
-- **Wallet invariant check** — bankroll == cash + invested (verified every 3s)
-- **Pydantic config validation** — strict type/range checking on startup
-- **Test suite** — pytest unit tests (Wallet, RiskManager, LatencyArb CDF)
+- **Daemon 24/7** — exponential backoff, stagnation detection, WAL checkpoint, SignalCheck/CashCheck/ResourceCheck
+- **Pydantic config validation** — with `extra=allow` for flexible extension
 
-### Strategies (5 total, 4 active)
-1. **latency_arb** — Binance price → PM odds lag (log-normal CDF probability model)
-2. **atomic_arb** — YES+NO < $1 risk-free pair trade (40 bps threshold, leg-delay simulated)
-3. **resolution_snipe** — Near-certain markets at 0.88-0.97 + TP/SL + CLOB WS real-time prices
-4. **momentum** — Multi-timeframe odds momentum (30s + 2m, sports_total allowed)
-5. **news_llm** — LLM news agent (stub, for future AI integration)
+### Active Strategy
+- **momentum** — Multi-timeframe odds momentum (5min + 15min) across ALL volatile markets
+  - Entry sweet spot: 0.30-0.70 odds (74% WR, 93% of profit)
+  - Safety: per-market 30% max exposure, position cap $500, streak protection
+  - 300 markets scanned per cycle, 3s interval
 
-### Risk Management
-- Per-strategy capital budget + circuit breaker
-- Correlation-aware exposure limits (net directional per asset)
-- Dynamic cash buffer (15% default → 25% when over-deployed)
-- Emergency mode (prevents deadlock when cash low)
-- Cash reservation pipeline (prevents over-allocation races)
-- Double-close race condition lock
+### Production Safety (v3.5.12)
+- **Per-market exposure limit** — max 30% bankroll in single market (prevents 350% concentration)
+- **Absolute position cap** — $500 max per trade regardless of bankroll
+- **Tier-based dynamic sizer** — 4 tiers with 10% hysteresis, 24h cooldown, grandfather clause
+- **Slippage simulation** — 70bps realistic market impact
+- **Wallet invariant** — bankroll == cash + invested (verified every cycle)
+- **Duplicate trade detection** — zero tolerance
+- **Auto-archive** — DB backup + CSV export before every reset
 
-### Market Category Filter
-- `sports_total` (O/U goals, Poisson, predictable) — allowed for momentum
-- `sports_spread` (handicap, random) — excluded (1 goal = flip)
-- `sports_match` (winner/draw, random) — excluded
-- `crypto`, `economics`, `politics`, `other` — allowed
+### Tier System
+| Tier | Bankroll | Max/Trade | Min Position | Label |
+|------|----------|-----------|-------------|-------|
+| 1 | $25-$275 | 20% | $3.00 | Aggressive Growth |
+| 2 | $275-$1,100 | 12% | $10.00 | Moderate Growth |
+| 3 | $1,100-$5,500 | 8% | $25.00 | Preservation |
+| 4 | $5,500+ | 5% | $50.00 | Stable Income |
 
 ---
 
-## Configuration
+## Deployment
 
-### Environment Variables (.env)
+- **VPS:** AWS EC2 t2.small (1 vCPU, 2GB RAM, Ubuntu)
+- **IP:** 3.107.53.103
+- **Instances:**
+  - Port 8082 — main ($25 bankroll, Run 2 consistency test)
+  - Port 8083 — micro ($10 bankroll, growth validation)
+- **Container names:** `polyclaw-cipher-v3`, `polyclaw-ten`
+- **RAM:** ~150MB total (both instances)
 
-```env
-BOT_MODE=paper
-INITIAL_BANKROLL_USD=25.00
-DATABASE_URL=sqlite+aiosqlite:///data/cipher_v3.db
-HTTP_HOST=0.0.0.0
-HTTP_PORT=8082
-LOG_LEVEL=INFO
-LOG_FORMAT=json
-CLOB_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
-BINANCE_WS_URL=wss://stream.binance.com:9443
-GAMMA_API_URL=https://gamma-api.polymarket.com
-```
-
-### Config File (config/default.yaml)
-
-Key settings:
-- `strategies.*.enabled` — enable/disable strategy
-- `strategies.*.max_position_pct` — max % bankroll per trade
-- `risk.max_daily_drawdown_pct` — daily DD limit (50% aggressive)
-- `risk.per_strategy.*.max_consecutive_losses` — circuit breaker
-- `risk.sizer.cash_min_pct` — cash buffer (15%, dynamic to 25%)
-
-Restart after config change:
 ```bash
-docker restart polyclaw-cipher-v3
+# Start / Stop / Rebuild
+docker compose up -d
+docker compose -f docker-compose.ten.yaml up -d
+docker compose stop
+docker compose -f docker-compose.ten.yaml stop
+
+# Reset bankroll for new cycle
+docker exec polyclaw-cipher-v3 python3 -c "
+import sqlite3, time
+db = sqlite3.connect('/app/data/cipher_v3.db')
+db.execute('UPDATE wallet SET bankroll=25.0, cash=25.0 WHERE id=1')
+db.commit()
+"
+docker compose restart
+
+# Archive trades before reset
+python3 scripts/archive_trades.py
+
+# Logs
+docker logs -f polyclaw-cipher-v3
 ```
 
 ---
@@ -112,33 +104,23 @@ docker restart polyclaw-cipher-v3
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Dashboard HTML |
-| GET | `/api/stats` | Full stats (bankroll, positions, trades, strategies, risk, ws_status) |
+| GET | `/api/stats` | Full stats (bankroll, trades, positions, strategies, tier, ws_status) |
 | GET | `/api/health` | Health check (`{status, version, uptime_sec}`) |
-| GET | `/api/config` | Effective config |
+| GET | `/api/admin/db_stats?hours=N` | Database statistics (localhost only) |
+| GET | `/api/admin/wal_checkpoint` | Force WAL checkpoint (localhost only) |
 | GET | `/metrics` | Prometheus metrics |
 
 ---
 
-## Deployment
+## Consistency Test Results
 
-- **VPS:** AWS EC2 t2.small (1 vCPU, 2GB RAM, Ubuntu)
-- **IP:** 3.107.53.103
-- **Port:** 8082 (public)
-- **Container:** `polyclaw-cipher-v3` (Docker, restart=unless-stopped)
-- **Resource limit:** 1GB RAM, 1 CPU
-- **Dashboard:** http://3.107.53.103:8082/
+| Run | Initial | Peak | Trades | WR | Duration | Notes |
+|-----|---------|------|--------|----|----------|-------|
+| 0 | $25 | $303 | 387 | 70% | ~6h | Pre-fix baseline |
+| 1 | $25 | $8,170 | 387 | 71% | ~12h | World Cup volatility, no caps |
+| 2 | $25 | — | ongoing | — | — | With caps & per-market limits |
 
-```bash
-# Start / Stop / Rebuild
-docker-compose up -d
-docker-compose down
-docker-compose up --build -d
-
-# Logs / Stats / Health
-docker logs -f polyclaw-cipher-v3
-curl http://localhost:8082/api/stats | python3 -m json.tool
-curl http://localhost:8082/api/health
-```
+**Note:** Run 1 profit inflated by World Cup event. 99.98% of trades were sport markets. Normal market expected: $25 → $50-100/week.
 
 ---
 
@@ -147,124 +129,82 @@ curl http://localhost:8082/api/health
 ```
 PolyClaw-Chiper/
 ├── README.md                    # This file
-├── CHANGELOG.md                 # Version history (v3.0.0 → v3.4.3)
+├── CHANGELOG.md                 # Full version history
+├── ARCHITECTURE.md              # 800-line design document
 ├── HANDOFF_AUTOCRAW.md          # Guide for autoclaw AI agent
-├── ARCHITECTURE.md              # Design document
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml           # Main instance ($25)
+├── docker-compose.ten.yaml      # Micro instance ($10)
 ├── pyproject.toml
 ├── .env.example
 ├── config/
 │   ├── default.yaml             # Main config
+│   ├── ten.yaml                 # $10 instance overlay
 │   └── paper.yaml               # Paper mode overlay
 ├── scripts/
-│   └── daemon.py                # Auto-heal daemon (24/7)
+│   ├── daemon.py                # Auto-heal daemon (24/7)
+│   └── archive_trades.py        # Trade DB archiver
 ├── src/polyclaw_cipher_v3/
-│   ├── bot.py                   # Orchestrator
-│   ├── config.py                # Pydantic config validation
-│   ├── core/
-│   │   ├── types.py             # Pydantic models + market categories
-│   │   ├── event_bus.py         # Async pub/sub
-│   │   ├── scanner.py           # Gamma API + fetch_market
-│   │   ├── resolution.py        # Price-based winner detection
-│   │   ├── binance_ws.py        # Binance WS + dynamic volatility
-│   │   ├── clob_ws.py           # Polymarket CLOB WS + set-based sync
-│   │   └── http_server.py       # FastAPI + dashboard + metrics
-│   ├── strategy/
-│   │   ├── base.py
-│   │   ├── latency_arb.py       # CDF probability model
-│   │   ├── atomic_arb.py        # Pair trade + leg delay
-│   │   ├── resolution_snipe.py  # CLOB WS real-time + TP/SL
-│   │   └── momentum.py          # Multi-timeframe + category filter
-│   ├── execution/
-│   │   └── paper.py             # Async executor + leg simulation
-│   ├── risk/
-│   │   ├── manager.py           # Unified gate + correlation limits
-│   │   └── sizer.py             # Dynamic cash buffer + emergency mode
-│   ├── state/
-│   │   ├── db.py                # SQLite WAL + atomic transactions
-│   │   ├── wallet.py            # Cash reservation + overdraft guard
-│   │   └── repository.py
-│   ├── agent/llm_client.py      # STUB (for future LLM)
-│   ├── alerts/__init__.py       # STUB (for future Telegram)
-│   └── observability/logs.py    # JSON structured logs
+│   ├── bot.py                   # Orchestrator + admin endpoints
+│   ├── config.py                # Pydantic config + TierConfig
+│   ├── core/                    # Scanner, CLOB WS, Binance WS, HTTP server
+│   ├── strategy/                # Momentum, atomic_arb, latency_arb, resolution_snipe
+│   ├── execution/               # Paper executor (70bps slip)
+│   ├── risk/                    # Sizer + TierManager + RiskManager
+│   ├── state/                   # Wallet + DB + Repository
+│   ├── alerts/                  # Telegram alerts stub
+│   ├── agent/                   # LLM agent stub
+│   └── observability/           # Structured logs
 ├── tests/
-│   └── test_bot_logic.py        # Unit tests (Wallet, RiskManager, CDF)
+│   └── test_bot_logic.py
 ├── docs/
-│   ├── reviews/                 # AI review files (Claude, Lisa, Grok)
-│   └── analysis/                # Analysis docs (V3, V31, target, recommendations)
 └── archive/
-    └── v2-legacy/               # v2 source code (stopped, for reference)
+    └── v2-legacy/
 ```
 
 ---
 
-## Roadmap
+## Version History (Recent)
 
-### ✅ Completed (v3.0.0 → v3.4.3)
-- v3.0.0: Complete rewrite from v2 (WebSocket, event bus, real resolution, async executor)
-- v3.1.0: v2 stopped, dashboard v3-only, CLOB WS fix, wallet invariant
-- v3.2.0: Market category filter, atomic_arb pair fix, cash buffer
-- v3.3.0: Multi-AI review consensus (8 fixes: category split, config conflict, record split, untrack, etc.)
-- v3.3.1: Autoclaw hotfix (atomic_arb category filter + sizer deadlock)
-- v3.4.0: Critical bug fixes (double-close lock, overdraft guard, DB cache, resolution sync)
-- v3.4.1: Strategy improvements (CDF model, correlation limits, cash reservation, state restoration)
-- v3.4.2: Production hardening (tests, config validation, Prometheus metrics, graceful shutdown)
-- v3.4.3: Critical resolution detection fix (resolved markets now close → cash freed)
+| Version | Date | Changes |
+|---------|------|---------|
+| 3.5.12 | 2026-06-28 | Per-market 30% limit, position cap $500, TierConfig Pydantic fix, `extra=allow`, dual-instance support, telegram alert stub |
+| 3.5.11 | 2026-06-28 | TierManager reads from config, dashboard dynamic version |
+| 3.5.10 | 2026-06-28 | Daemon watchdog (SignalCheck/CashCheck/ResourceCheck), admin endpoints |
+| 3.5.9 | 2026-06-28 | Tier-based dynamic sizer with hysteresis |
+| 3.5.8 | 2026-06-27 | Atomic_arb 100bps, live-readiness config |
+| 3.5.7 | 2026-06-27 | 3 quick wins: disable res_snipe, atomic_arb 100bps, momentum 6 max |
+| 3.5.6 | 2026-06-27 | Aggressive config overlay: 200 markets, all categories |
+| 3.5.5 | 2026-06-27 | Super Z forensic audit fixes (6 P0 + 3 P1) |
 
-### ⏸️ Pending
-- **MASALAH-6:** 0 crypto Up/Down detection (latency_arb dead — scanner threshold mismatch)
-- **Event bus wiring:** Strategies still pull-based (1s loop), target <50ms
-- **LLM agent:** Test CryptoPanic latency real before commit
-- **Sample size:** Track 30-50 unique markets per strategy (not total trades)
-- **Telegram alerts:** Stub ready, needs real implementation
-- **Live trading (v4):** After paper trading proven profitable ≥14 days
-
----
-
-## Documentation
-
-| File | Description |
-|------|-------------|
-| `CHANGELOG.md` | Full version history with details |
-| `HANDOFF_AUTOCRAW.md` | Guide for autoclaw AI to extend bot |
-| `ARCHITECTURE.md` | 700-line design document |
-| `docs/reviews/` | AI reviews (Claude, Lisa/Qwen, Grok) + discussion rounds |
-| `docs/analysis/` | Analysis docs (V3, V31, target, v2 recommendations) |
-| `archive/v2-legacy/` | v2 source code (stopped, for reference) |
+Full changelog: [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
 ## Safety
 
 - ✅ Paper trading only (`BOT_MODE=paper`)
-- ✅ No API keys in code (via `.env`, gitignored)
 - ✅ Circuit breaker per strategy (auto-disable on loss streak)
-- ✅ Daily drawdown limit (50%, configurable)
-- ✅ Wallet overdraft guard (`InsufficientFundsError`)
-- ✅ Double-close race condition lock
-- ✅ Wallet invariant check (every 3s)
+- ✅ Daily drawdown limit (50%)
+- ✅ Wallet overdraft guard
+- ✅ Wallet invariant check (every cycle)
+- ✅ Per-market concentration limit (30%)
+- ✅ Absolute position cap ($500)
+- ✅ Duplicate trade detection (zero tolerance)
 - ✅ Health check + auto-restart (daemon 24/7)
 
-### Before Live Trading (v4)
-- [ ] Paper trading ≥ 14 days profitable
-- [ ] Win rate ≥ 50% per strategy
+### Before Live Trading
+- [ ] Paper trading ≥ 14 days profitable across multiple reset cycles
+- [ ] Win rate ≥ 55% per strategy in normal market conditions
 - [ ] Max drawdown ≤ 30%
-- [ ] 30-50 unique markets sample per strategy
-- [ ] Unit tests pass
 - [ ] Telegram alerts active
-- [ ] `py-clob-client` integration + leg-risk stress test
-
----
-
-## License
-
-Private project. All rights reserved.
+- [ ] Rate limit + realistic fill simulation
 
 ---
 
 ## Links
 
 - **Repository:** https://github.com/doyoindah7/PolyClaw-Chiper
-- **Dashboard:** http://3.107.53.103:8082/
+- **Dashboard (main):** http://3.107.53.103:8082/
+- **Dashboard (micro):** http://3.107.53.103:8083/
 - **VPS:** 3.107.53.103 (AWS t2.small)
