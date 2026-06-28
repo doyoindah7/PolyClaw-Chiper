@@ -180,5 +180,5 @@ monitoring:
 # v3.5.9 Tier-Based Dynamic Sizer
 tier:
   mode: auto
-  force_tier: 0
+  force_tier: 1  # LOCKED for consistency test cycles
   cooldown_hours: 24

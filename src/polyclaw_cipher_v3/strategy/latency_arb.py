@@ -64,6 +64,17 @@ class LatencyArbStrategy(BaseStrategy):
         self._threshold_signals = 0
         self._updown_evaluated = 0
 
+    def _detect_crypto(self, question: str) -> str | None:
+        """v3.6.0: Detect crypto asset from question text directly (bypass Market field)."""
+        q = question.upper()
+        if "BITCOIN" in q or " BTC " in q or q.startswith("BTC ") or q.endswith(" BTC"):
+            return "BTC"
+        if "ETHEREUM" in q or " ETH " in q or q.startswith("ETH ") or q.endswith(" ETH"):
+            return "ETH"
+        if "SOLANA" in q or " SOL " in q or q.startswith("SOL ") or q.endswith(" SOL"):
+            return "SOL"
+        return None
+
     def set_feeds(self, binance_feed, clob_feed) -> None:
         self._binance = binance_feed
         self._clob = clob_feed
@@ -143,11 +154,11 @@ class LatencyArbStrategy(BaseStrategy):
         if not self._binance:
             return None
 
-        if not market.crypto_asset:
+        # v3.6.0: Detect crypto from question directly (crypto_asset field may not be set)
+        asset = self._detect_crypto(market.question) or market.crypto_asset
+        if not asset:
             self._skip_no_crypto += 1
             return None
-
-        asset = market.crypto_asset
         binance_price = self._binance.get_price(asset)
         if binance_price <= 0:
             self._skip_no_binance += 1
@@ -168,7 +179,9 @@ class LatencyArbStrategy(BaseStrategy):
         # Real-world slippage 0.5-2% will eat any profit; worse, bot can lose 100% if
         # it bets against the near-certain side. These markets also trap cash for hours.
         max_price = max(yes_price, no_price)
-        if max_price > 0.95:
+        # v3.6.0: Only filter nearly-resolved for Up/Down, not threshold (legitimate near-certain)
+        is_updown_or_none = is_updown and not has_threshold
+        if is_updown_or_none and max_price > 0.95:
             self._skip_nearly_resolved += 1
             return None
 
