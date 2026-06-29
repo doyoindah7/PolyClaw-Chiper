@@ -154,8 +154,43 @@ risk:
     high_deploy_threshold: 0.70       # If deployed > 70%, force cash_min_pct to high_deploy_reserve
     high_deploy_reserve: 0.25         # Force 25% cash buffer when over-deployed
 
-# === EXECUTION — Paper Trading ===
+# === EXECUTION ===
 execution:
+  mode: paper  # "paper" | "live"
+
+  # v3.5.16: Polygon RPC endpoints (for live trading)
+  rpc:
+    primary: "https://polygon.llamarpc.com"       # 7ms from Ireland, DefiLlama
+    fallback: "https://rpc.ankr.com/polygon"      # 80ms, Ankr public
+    emergency: "https://polygon-rpc.com"           # 82ms, Polygon public
+    chain_id: 137                                   # Polygon PoS mainnet
+    max_retries: 3
+    retry_delay_sec: 1.0
+    timeout_sec: 10
+
+  # Live trading via Polymarket CLOB API + Relayer
+  live:
+    # Builder/relayer config (from .env: BUILDER_PROFILE, RELAYER_API_KEY)
+    relayer_enabled: false
+    # Gas strategy (Polygon fees are cheap but can spike)
+    gas:
+      max_fee_per_gas_gwei: 500      # Cap at 500 gwei
+      priority_fee_gwei: 30          # Standard priority
+      gas_limit: 500000               # Typical order tx
+      # Dynamic adjustment: if pending > 10s, bump priority by 20%
+      dynamic_priority: true
+      priority_bump_pct: 0.20
+    # Slippage for live orders (on-chain, not simulated)
+    slippage_bps: 50                  # 0.5% default slippage
+    max_slippage_bps: 200             # 2% worst case
+    # Order splitting: if position > $500, split into multiple orders
+    max_order_usd: 500
+    split_enabled: true
+    # Confirmation wait
+    tx_confirm_blocks: 1              # Wait 1 block for confirmation
+    tx_timeout_sec: 60                # Fail if not confirmed in 60s
+
+  # Paper trading simulation
   paper:
     # === v3.5.13 LIVE-REALISM TIER 1 (autoclaw-reviewed parameters) ===
     # Slippage: liquidity-based (function of notional / volume_24h)
