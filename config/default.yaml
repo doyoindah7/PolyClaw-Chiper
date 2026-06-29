@@ -8,6 +8,24 @@ bot:
   scan_interval_sec: 60               # Gamma API scan (WS handles real-time)
   max_open_positions: 10              # Total across all strategies
 
+# v3.5.17: Auto-Tune v2 — Dynamic market-aware config engine
+# Per-feature toggles: disable individual features without killing whole system
+auto_tune:
+  enabled: true                # master switch (env SKIP_AUTO_TUNE=1 overrides)
+  mode: hybrid                 # startup | hybrid (startup + periodic updates)
+  update_interval_hours: 1     # periodic update every 1 hour
+  min_new_trades: 10           # skip update if <10 new trades since last
+  max_change_pct: 20           # max 20% change per parameter per update
+  rollback_wr: 40              # skip update if recent WR < 40%
+  features:
+    entry_range: true           # per-category entry price [min, max]
+    momentum_threshold: true    # per-category short/long momentum %
+    hold_time: true             # per-category max hold time
+    tp_sl: true                 # per-category TP/SL %
+    category_blacklist: true    # auto-disable categories with WR < 40% (min 50 trades)
+    side_bias: true             # prefer YES or NO per category
+    max_positions: true         # per-category concurrency cap
+
 market:
   min_volume_24h_usd: 500
   min_liquidity: 100

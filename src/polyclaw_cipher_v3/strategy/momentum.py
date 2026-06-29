@@ -68,6 +68,12 @@ class MomentumStrategy(BaseStrategy):
         self._dbg_evaluated = 0
         self._dbg_signal = 0
         self._dbg_vol_spike = 0  # v3.5.16: volume spike boosted signals
+        # v3.5.17: Auto-tune v2 per-category params
+        self._auto_tune = None  # set via set_auto_tune()
+
+    def set_auto_tune(self, auto_tune) -> None:
+        """Set auto-tune v2 engine for per-category parameter lookup."""
+        self._auto_tune = auto_tune
 
     def set_clob_feed(self, clob_feed) -> None:
         self._clob = clob_feed
@@ -83,9 +89,18 @@ class MomentumStrategy(BaseStrategy):
             self._dbg_random_outcome += 1
             return None
         cat = market.classify()
-        if self.allowed_categories and cat not in self.allowed_categories:
-            self._dbg_cat_filtered += 1
-            return None
+        # v3.5.17: Auto-tune v2 per-category params
+        at_params = None
+        if self._auto_tune is not None:
+            at_params = self._auto_tune.get_params(cat)
+            if not at_params.enabled:
+                self._dbg_cat_filtered += 1
+                return None
+        # Category filter (still apply config-level filter if auto-tune disabled)
+        if self._auto_tune is None:
+            if self.allowed_categories and cat not in self.allowed_categories:
+                self._dbg_cat_filtered += 1
+                return None
 
         # Filters
         if market.volume_24h < 100:  # v3.5.6: 500->100
@@ -94,7 +109,12 @@ class MomentumStrategy(BaseStrategy):
         # v3.5.16 FIX: Use CLOB mid price for entry range check (market.yes_price is stale from Gamma)
         clob_mid = self._clob.get_price(market.yes_token_id) if self._clob else 0.0
         check_price = clob_mid if clob_mid > 0 else market.yes_price
-        if check_price < self.min_entry_price or check_price > self.max_entry_price:
+        # v3.5.17: Use auto-tune per-category entry range if available
+        if at_params is not None:
+            min_entry, max_entry = at_params.entry_range
+        else:
+            min_entry, max_entry = self.min_entry_price, self.max_entry_price
+        if check_price < min_entry or check_price > max_entry:
             self._dbg_price_filtered += 1
             return None
 
@@ -108,7 +128,9 @@ class MomentumStrategy(BaseStrategy):
         # Max positions
         open_positions = context.get("open_positions", [])
         my_positions = [p for p in open_positions if p.strategy == self.name]
-        if len(my_positions) >= self.max_positions:
+        # v3.5.17: Use auto-tune per-category max_positions if available
+        effective_max_pos = at_params.max_positions if at_params is not None else self.max_positions
+        if len(my_positions) >= effective_max_pos:
             self._dbg_max_pos += 1
             return None
 
@@ -154,11 +176,18 @@ class MomentumStrategy(BaseStrategy):
         max_change_long = max(abs(yes_change_long), abs(no_change_long))
 
         # v3.5.16: Lower momentum threshold if volume spike detected
-        effective_min_short = self.min_momentum_short_pct
-        effective_min_long = self.min_momentum_long_pct
+        # v3.5.17: Use auto-tune per-category thresholds if available
+        if at_params is not None:
+            base_short = at_params.momentum_short_pct
+            base_long = at_params.momentum_long_pct
+        else:
+            base_short = self.min_momentum_short_pct
+            base_long = self.min_momentum_long_pct
+        effective_min_short = base_short
+        effective_min_long = base_long
         if has_vol_spike:
-            effective_min_short = self.min_momentum_short_pct * (1.0 - self.vol_spike_boost)
-            effective_min_long = self.min_momentum_long_pct * (1.0 - self.vol_spike_boost)
+            effective_min_short = base_short * (1.0 - self.vol_spike_boost)
+            effective_min_long = base_long * (1.0 - self.vol_spike_boost)
 
         if max_change_short < effective_min_short:
             self._dbg_no_change += 1

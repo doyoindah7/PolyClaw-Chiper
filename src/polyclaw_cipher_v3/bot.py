@@ -178,10 +178,22 @@ class PolyClawCipherV3:
         except Exception as e:
             logger.error("Failed to restore strategy states from DB: %s", e)
 
-        # v3.5.13: Auto-tune from history - analyze latest archive, apply in-memory
-        # v3.5.16: Can be disabled via SKIP_AUTO_TUNE=1 env var (while auto-tune v2 is built)
+        # v3.5.17: Auto-tune v2 (dynamic, per-category)
+        # v3.5.16: Can be disabled via SKIP_AUTO_TUNE=1 env var
+        self._auto_tune_v2 = None
         if os.environ.get("SKIP_AUTO_TUNE", "0") != "1":
-            self._auto_tune_from_history()
+            try:
+                from .tuning import AutoTuneV2
+                master_path = Path("data/master_history.db")
+                self._auto_tune_v2 = AutoTuneV2(self.config, master_path, instance_label)
+                self._auto_tune_v2.run_startup()
+                # Inject into momentum strategy
+                for strat in self.strategies:
+                    if strat.name == "momentum":
+                        strat.set_auto_tune(self._auto_tune_v2)
+                        logger.info("Auto-tune v2: injected into momentum strategy")
+            except Exception as e:
+                logger.error("Auto-tune v2 failed (non-fatal): %s", e)
         else:
             logger.info("Auto-tune: SKIP_AUTO_TUNE=1 — using config values as-is")
 
@@ -193,6 +205,8 @@ class PolyClawCipherV3:
         self._stats_task = asyncio.create_task(self._refresh_stats_loop(), name="stats_cache")
         # v3.5.5 FIX (P1-03): Periodic WAL checkpoint every 30 min to flush WAL file
         self._checkpoint_task = asyncio.create_task(self._checkpoint_loop(), name="wal_checkpoint")
+        # v3.5.17: Auto-tune v2 periodic update loop
+        self._autotune_task = asyncio.create_task(self._autotune_loop(), name="autotune_v2")
 
         await self.alerter.notify_startup(
             self.wallet.bankroll,
@@ -1108,6 +1122,22 @@ class PolyClawCipherV3:
                 break
             except Exception as e:
                 logger.error("WAL checkpoint error: %s", e)
+
+    async def _autotune_loop(self) -> None:
+        """v3.5.17: Auto-tune v2 periodic update loop.
+
+        Runs every 1 hour (configurable). Calls auto-tune v2's run_periodic()
+        which checks if enough new trades exist and re-evaluates parameters.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(3600)  # 1 hour
+                if self._auto_tune_v2 is not None:
+                    self._auto_tune_v2.run_periodic()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Auto-tune v2 periodic error: %s", e)
 
     async def _trigger_wal_checkpoint(self) -> None:
         """v3.5.7: Manual WAL checkpoint trigger via admin API.
