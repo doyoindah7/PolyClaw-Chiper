@@ -336,6 +336,7 @@ body {
 .tag.resolution_snipe { background: rgba(255,145,0,0.15); color: var(--orange); }
 .tag.momentum { background: rgba(187,134,252,0.15); color: var(--purple); }
 .tag.news_llm { background: rgba(24,255,255,0.15); color: var(--cyan); }
+.tag.convergence_scalper { background: rgba(255,82,82,0.15); color: var(--red); }
 
 /* Strategy cards */
 .strat-grid { display: grid; gap: 8px; }

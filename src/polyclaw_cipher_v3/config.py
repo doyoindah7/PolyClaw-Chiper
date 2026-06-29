@@ -63,6 +63,7 @@ class ResolutionSnipeConfig(BaseModel):
 
 
 class MomentumConfig(BaseModel):
+    model_config = {"extra": "allow"}  # v3.5.16: allow experimental fields (vol_spike_*)
     enabled: bool = True
     lookback_short_sec: int = Field(default=30, ge=1)
     lookback_long_sec: int = Field(default=120, ge=1)

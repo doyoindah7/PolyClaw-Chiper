@@ -67,6 +67,11 @@ strategies:
     max_position_pct: 0.15
     max_positions: 6
     cooldown_sec: 30
+    # v3.5.16: Volume Spike Detector — NOVA EXCLUSIVE
+    vol_spike_enabled: true
+    vol_spike_threshold: 3.0    # 3x normal tick rate = spike
+    vol_spike_boost: 0.15       # lower momentum threshold by 15% when spike
+    vol_spike_confidence_boost: 0.10  # +10% confidence when spike
     min_entry_price: 0.10
     max_entry_price: 0.95
     allowed_categories: [crypto, sports_match, sports_total, sports_spread, economics, politics, other]

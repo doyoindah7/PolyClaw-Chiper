@@ -40,7 +40,7 @@ class MomentumStrategy(BaseStrategy):
         # v3.5.12: Max % bankroll in single market
         self.max_per_market_pct = c.get("max_per_market_pct", 0.30)
         # v3.5.16: Volume spike detector config
-        self.vol_spike_enabled = c.get("vol_spike_enabled", True)
+        self.vol_spike_enabled = c.get("vol_spike_enabled", False)  # Nova-only
         self.vol_spike_threshold = c.get("vol_spike_threshold", 3.0)  # 3x normal = spike
         self.vol_spike_boost = c.get("vol_spike_boost", 0.15)  # lower momentum requirement by 15%
         self.vol_spike_confidence_boost = c.get("vol_spike_confidence_boost", 0.10)  # +10% confidence
@@ -53,7 +53,7 @@ class MomentumStrategy(BaseStrategy):
         self._entry_prices: dict[str, float] = {}
         self._entry_times: dict[str, float] = {}
         self._entry_invested: dict[str, float] = {}  # v3.5.11: fee-aware time exit
-        # v3.5.6 debug counters
+        # v3.5.16 debug counters
         self._dbg_no_clob = 0
         self._dbg_random_outcome = 0
         self._dbg_cat_filtered = 0
