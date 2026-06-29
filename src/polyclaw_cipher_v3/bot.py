@@ -185,7 +185,8 @@ class PolyClawCipherV3:
             try:
                 from .tuning import AutoTuneV2
                 master_path = Path("data/master_history.db")
-                self._auto_tune_v2 = AutoTuneV2(self.config, master_path, instance_label)
+                label = os.environ.get("TG_INSTANCE_LABEL", os.environ.get("BOT_MODE", "bot"))
+                self._auto_tune_v2 = AutoTuneV2(self.config, master_path, label)
                 self._auto_tune_v2.run_startup()
                 # Inject into momentum strategy
                 for strat in self.strategies:
