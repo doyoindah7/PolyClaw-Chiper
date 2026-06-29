@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -107,10 +108,13 @@ class HTTPServer:
             # Unprotected: safe to expose for docker / cluster healthchecks
             # v3.5.9: Use __version__ from package instead of hardcoded string
             from .. import __version__
+            label = os.environ.get("TG_INSTANCE_LABEL", os.environ.get("BOT_MODE", "bot"))
             return {
                 "status": "ok",
                 "version": __version__,
                 "uptime_sec": int(time.time() - (self._start_time or time.time())),
+                "instance_label": label,
+                "mode": os.environ.get("BOT_MODE", "paper"),
             }
 
         @self.app.get("/api/config")
@@ -227,7 +231,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyClaw-Cipher v3.5.15 🔍</title>
+<title>🔍 PolyClaw-Cipher v3.5.15</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -375,7 +379,7 @@ body {
   <div id="alerts-container"></div>
   <div class="hdr">
     <div>
-      <h1>🔍 PolyClaw-Cipher v3.5.15</h1>
+            <h1>🔍 <span id="instance-label">PolyClaw-Cipher</span> v3.5.15</h1>
       <div class="sub">Paper Trading · auto-refresh 5s · <span id="refresh-status" style="color:var(--green)">connecting...</span> · updated <span id="last-update">--</span></div>
     </div>
     <div style="text-align:right">
@@ -1006,6 +1010,18 @@ function renderSystem(d) {
   // Market distribution
   renderMarketDist(d);
 }
+
+async function loadInstanceLabel() {
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    const label = (d.instance_label || d.mode || 'bot');
+    const cap = label.charAt(0).toUpperCase() + label.slice(1);
+    document.getElementById('instance-label').textContent = cap;
+    document.title = '🔍 ' + cap + ' - PolyClaw v' + d.version;
+  } catch(e) {}
+}
+loadInstanceLabel();
 
 async function refresh() {
   try {

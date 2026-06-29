@@ -105,11 +105,27 @@ class CompoundingSizer:
         )
         notional = base_notional * conf_mult
 
+        # v3.5.16: Tier-based overrides — read from tier_manager if available
+        tier_cfg = {}
+        if self.tier_manager:
+            tier_cfg = self.tier_manager.get_config(bankroll)
+        tier_max_pct = tier_cfg.get("max_pct_per_trade", self.max_pct_per_trade)
+        tier_min_pos = tier_cfg.get("min_position_usd", self.min_position_usd)
+        tier_max_pos = tier_cfg.get("max_open_positions", max_total_positions)
+        # Override global max from tier if tier_manager is active
+        effective_max_total = tier_max_pos if self.tier_manager else max_total_positions
+        
+        # Re-check position limit with tier override
+        if total_open_positions >= effective_max_total:
+            return 0.0
+        if total_open_positions >= int(effective_max_total * 1.3):
+            return 0.0
+        
         # v3.3.0: Caps — per-strategy is PRIMARY, global is ceiling only
         # Order matters: per-strategy cap applied FIRST (primary source of truth),
-        # then global ceiling as safety net (catch typos like 5.0 = 500%)
+        # then global/tier ceiling as safety net (catch typos like 5.0 = 500%)
         notional = min(notional, bankroll * strategy_max_pct)  # PRIMARY cap
-        notional = min(notional, bankroll * self.max_pct_per_trade)  # Safety ceiling
+        notional = min(notional, bankroll * tier_max_pct)  # Tier-aware ceiling
         notional = min(notional, cash * 0.95)  # Always leave 5% buffer
 
         # v3.5.12: Absolute position cap — prevent unrealistic size explosion
@@ -118,8 +134,8 @@ class CompoundingSizer:
         if self.max_absolute_position > 0:
             notional = min(notional, self.max_absolute_position)
 
-        # Hard floor
-        if notional < self.min_position_usd:
+        # Hard floor (tier-aware min)
+        if notional < tier_min_pos:
             return 0.0
 
         return round(notional, 2)

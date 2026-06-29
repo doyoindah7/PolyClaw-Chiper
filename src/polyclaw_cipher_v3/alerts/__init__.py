@@ -1,23 +1,61 @@
-"""Alerts module — STUB (Telegram alerts skipped per user request).
-
-To activate Telegram alerts later:
-1. Create bot via @BotFather, get BOT_TOKEN
-2. Get CHAT_ID via @userinfobot
-3. Add to .env:
-   TELEGRAM_BOT_TOKEN=...
-   TELEGRAM_CHAT_ID=...
-4. Implement TelegramAlerter class here
-"""
+"""Alerts module — loads TelegramAlerter if TG_BOT_TOKEN is set, else falls back to stub."""
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class Alerter:
-    """Stub alerter — logs instead of sending notifications."""
+    """Auto-selects TelegramAlerter (if configured) or stub alerter."""
+
+    def __init__(self, config: dict[str, Any] | None = None):
+        self.config = config or {}
+        token = os.environ.get("TG_BOT_TOKEN", "")
+
+        if token:
+            try:
+                from polyclaw_cipher_v3.alerts.telegram import TelegramAlerter
+                self._alerter = TelegramAlerter(config)
+                self.enabled = self._alerter.enabled
+                if self.enabled:
+                    label = os.environ.get("TG_INSTANCE_LABEL", os.environ.get("BOT_MODE", "bot"))
+                    logger.info("Alerts: Telegram enabled for instance '%s'", label)
+                return
+            except ImportError:
+                logger.warning("Alerts: TG_BOT_TOKEN set but telegram module not found — using stub")
+
+        # Stub fallback
+        self._alerter = _StubAlerter(config)
+        self.enabled = False
+
+    async def notify_startup(self, bankroll: float, strategies: list[str], version: str = "v3") -> None:
+        await self._alerter.notify_startup(bankroll, strategies, version)
+
+    async def notify_trade(self, side: str, entry_price: float, invested: float,
+                           confidence: float, question: str, strategy: str) -> None:
+        await self._alerter.notify_trade(side, entry_price, invested, confidence, question, strategy)
+
+    async def notify_trade_close(self, strategy: str, side: str, pnl: float, reason: str) -> None:
+        await self._alerter.notify_trade_close(strategy, side, pnl, reason)
+
+    async def notify_pnl(self, bankroll: float, initial: float, trades: int, win_rate: float) -> None:
+        await self._alerter.notify_pnl(bankroll, initial, trades, win_rate)
+
+    async def notify_drawdown(self, current_dd: float, max_dd: float) -> None:
+        await self._alerter.notify_drawdown(current_dd, max_dd)
+
+    async def notify_crash(self, error: str) -> None:
+        await self._alerter.notify_crash(error)
+
+    async def close(self) -> None:
+        await self._alerter.close()
+
+
+class _StubAlerter:
+    """Stub alerter — logs only."""
 
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = config or {}

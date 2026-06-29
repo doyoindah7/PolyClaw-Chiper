@@ -141,7 +141,8 @@ class MonitoringConfig(BaseModel):
 
 
 class TierConfig(BaseModel):
-    """v3.5.12 — Tier-based dynamic position sizing config."""
+    """v3.5.16 — Tier-based dynamic position sizing config with customizable tiers."""
+    model_config = {"extra": "allow"}
     mode: str = "auto"
     force_tier: int = Field(default=0, ge=0, le=4)
     cooldown_hours: float = Field(default=24.0, ge=0.0)

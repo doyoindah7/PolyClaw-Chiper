@@ -75,7 +75,7 @@ class PolyClawCipherV3:
 
         # Risk + Sizer
         self.risk = RiskManager(self.config.get("risk", {}))
-        self._tier_manager = TierManager(force_tier=self.config.get("tier", {}).get("force_tier", 0))
+        self._tier_manager = TierManager(force_tier=self.config.get("tier", {}).get("force_tier", 0), cooldown_hours=self.config.get("tier", {}).get("cooldown_hours", 24), yaml_config=self.config.get("tier", {}))
         self.sizer = CompoundingSizer(self.config.get("risk", {}).get("sizer", {}), tier_manager=self._tier_manager)
 
         # Executor
