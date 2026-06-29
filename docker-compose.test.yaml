@@ -1,0 +1,17 @@
+services:
+  polyclaw-cipher-v3:
+    environment:
+      - BOT_MODE=paper
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+      - INITIAL_BANKROLL_USD=25.00
+      - HTTP_HOST=0.0.0.0
+      - HTTP_PORT=8082
+      - LOG_FORMAT=json
+      - STAGNATION_THRESHOLD_MIN=2
+      - STAGNATION_CHECK_INTERVAL=30
+      - WATCHDOG_CHECK_INTERVAL=30
+      - BOT_LABEL=$25-main
+      - CONTAINER_NAME=polyclaw-cipher-v3
+    env_file:
+      - .env

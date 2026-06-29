@@ -1,0 +1,23 @@
+services:
+  polyclaw-fifteen:
+    environment:
+      - BOT_MODE=fifteen
+      - HTTP_PORT=8084
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+      - TG_DISABLE_POLL=true
+      - STAGNATION_THRESHOLD_MIN=2
+      - STAGNATION_CHECK_INTERVAL=30
+      - WATCHDOG_CHECK_INTERVAL=30
+      - BOT_LABEL=$15-micro
+      - CONTAINER_NAME=polyclaw-fifteen
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 1g
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

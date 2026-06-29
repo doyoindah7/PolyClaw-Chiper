@@ -12,7 +12,7 @@ CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 # v3.5.16: Ireland-only (EC2 decommissioned)
 DEFAULT_BASES = json.dumps([
     {"label": "🇮🇪 Ireland", "host": "http://18.200.234.149", "instances": [
-        (8082, "Cipher $25"), (8084, "Fifteen $15"), (8086, "Scalper"), (8088, "Nova")
+        (8082, "Cipher"), (8084, "Fifteen"), (8086, "Scalper"), (8088, "Nova")
     ]},
 ])
 BASES_RAW = os.environ.get("BOT_API_BASES", DEFAULT_BASES)
