@@ -32,6 +32,7 @@ class LocalOrderbook:
     last_price: float = 0.0
     last_update: float = 0.0
     ticks: deque = field(default_factory=lambda: deque(maxlen=2000))  # (ts, price)
+    tick_times: list = field(default_factory=list)  # v3.5.16: tick timestamps for volume spike
 
     def apply_snapshot(self, snapshot: dict) -> None:
         """Apply full orderbook snapshot."""
@@ -92,8 +93,33 @@ class LocalOrderbook:
     def record_tick(self, price: float) -> None:
         if price > 0:
             self.last_price = price
-            self.ticks.append((time.time(), price))
-            self.last_update = time.time()
+            now = time.time()
+            self.ticks.append((now, price))
+            self.last_update = now
+            # v3.5.16: Track tick rate for volume spike detection
+            self.tick_times.append(now)
+            # Prune old ticks (keep last 5 min)
+            cutoff = now - 300
+            self.tick_times = [t for t in self.tick_times if t > cutoff]
+
+    def tick_rate(self, window_sec: float = 60.0) -> float:
+        """Ticks per second over last N seconds."""
+        if not self.tick_times:
+            return 0.0
+        now = time.time()
+        cutoff = now - window_sec
+        recent = [t for t in self.tick_times if t > cutoff]
+        return len(recent) / window_sec if window_sec > 0 else 0.0
+
+    def volume_spike_score(self, short_sec: float = 60.0, long_sec: float = 300.0) -> float:
+        """Volume spike score: short_rate / max(long_rate, 0.01).
+        >3.0 = significant spike (>3x normal activity).
+        """
+        short_rate = self.tick_rate(short_sec)
+        long_rate = self.tick_rate(long_sec)
+        if long_rate <= 0:
+            return 0.0
+        return short_rate / long_rate
 
     def pct_change(self, lookback_sec: float) -> float:
         """% change over last N seconds."""
@@ -385,6 +411,16 @@ class CLOBFeed:
     def get_best_ask(self, token_id: str) -> float:
         book = self.books.get(token_id)
         return book.best_ask() if book else 0.0
+
+    def get_volume_spike(self, token_id: str, short_sec: float = 60.0, long_sec: float = 300.0) -> float:
+        """v3.5.16: Volume spike score for token. >3.0 = significant."""
+        book = self.books.get(token_id)
+        return book.volume_spike_score(short_sec, long_sec) if book else 0.0
+
+    def get_tick_rate(self, token_id: str, window_sec: float = 60.0) -> float:
+        """v3.5.16: Ticks per second over last N seconds."""
+        book = self.books.get(token_id)
+        return book.tick_rate(window_sec) if book else 0.0
 
     def get_pct_change(self, token_id: str, lookback_sec: float) -> float:
         book = self.books.get(token_id)

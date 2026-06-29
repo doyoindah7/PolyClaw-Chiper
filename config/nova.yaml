@@ -30,7 +30,7 @@ strategies:
     enabled: false
 
   atomic_arb:
-    enabled: true                # v3.5.16: Zero-risk YES+NO < $1 arbitrage
+    enabled: false               # DISABLED pending deep research
     min_profit_bps: 40
     max_position_pct: 0.40
     max_concurrent: 3
@@ -41,7 +41,7 @@ strategies:
   # === CONVERGENCE SCALPER ("Bone Reaper") ===
   # v3.5.16: Buy winning token dips near market close
   convergence_scalper:
-    enabled: true
+    enabled: false              # DISABLED pending deep research
     max_minutes_to_close: 30
     min_winning_price: 0.97
     max_entry_price: 0.955

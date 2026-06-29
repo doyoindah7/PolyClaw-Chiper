@@ -39,6 +39,11 @@ class MomentumStrategy(BaseStrategy):
         self.max_volatility = c.get("max_volatility", 0.08)
         # v3.5.12: Max % bankroll in single market
         self.max_per_market_pct = c.get("max_per_market_pct", 0.30)
+        # v3.5.16: Volume spike detector config
+        self.vol_spike_enabled = c.get("vol_spike_enabled", True)
+        self.vol_spike_threshold = c.get("vol_spike_threshold", 3.0)  # 3x normal = spike
+        self.vol_spike_boost = c.get("vol_spike_boost", 0.15)  # lower momentum requirement by 15%
+        self.vol_spike_confidence_boost = c.get("vol_spike_confidence_boost", 0.10)  # +10% confidence
         # FIX v3.4.0 (ARCH-1): Category filter — skip random-outcome markets
         self.skip_random_outcome = c.get("skip_random_outcome", True)
         # Updated fallback default from stale "sports_derivative"
@@ -62,6 +67,7 @@ class MomentumStrategy(BaseStrategy):
         self._dbg_no_notional = 0
         self._dbg_evaluated = 0
         self._dbg_signal = 0
+        self._dbg_vol_spike = 0  # v3.5.16: volume spike boosted signals
 
     def set_clob_feed(self, clob_feed) -> None:
         self._clob = clob_feed
@@ -137,14 +143,27 @@ class MomentumStrategy(BaseStrategy):
         if yes_price_clob <= 0 and no_price_clob <= 0:
             return None
 
+        # v3.5.16: Volume spike detection
+        vol_spike = 0.0
+        if self.vol_spike_enabled:
+            vol_spike = self._clob.get_volume_spike(market.yes_token_id, 60.0, 300.0)
+        has_vol_spike = vol_spike >= self.vol_spike_threshold
+
         # Multi-timeframe analysis
         max_change_short = max(abs(yes_change_short), abs(no_change_short))
         max_change_long = max(abs(yes_change_long), abs(no_change_long))
 
-        if max_change_short < self.min_momentum_short_pct:
+        # v3.5.16: Lower momentum threshold if volume spike detected
+        effective_min_short = self.min_momentum_short_pct
+        effective_min_long = self.min_momentum_long_pct
+        if has_vol_spike:
+            effective_min_short = self.min_momentum_short_pct * (1.0 - self.vol_spike_boost)
+            effective_min_long = self.min_momentum_long_pct * (1.0 - self.vol_spike_boost)
+
+        if max_change_short < effective_min_short:
             self._dbg_no_change += 1
             return None
-        if max_change_long < self.min_momentum_long_pct:
+        if max_change_long < effective_min_long:
             self._dbg_no_change += 1
             return None
 
@@ -164,6 +183,15 @@ class MomentumStrategy(BaseStrategy):
         trend_alignment = 1.0 if (yes_change_short * yes_change_long) > 0 else 0.7
         confidence = min(0.92, 0.45 + abs(change) / 15.0)
         confidence *= trend_alignment
+
+        # v3.5.16: Volume spike confidence boost
+        if has_vol_spike:
+            confidence = min(0.98, confidence + self.vol_spike_confidence_boost)
+            self._dbg_vol_spike += 1
+            logger.info(
+                "MOMENTUM + VOL SPIKE: %s | spike=%.1fx change=%+.2f%% conf=%.2f | %s",
+                market.condition_id[:8], vol_spike, change, confidence, market.question[:50],
+            )
 
         if confidence < self.min_confidence:
             self._dbg_low_conf += 1
@@ -240,6 +268,7 @@ class MomentumStrategy(BaseStrategy):
             "no_change": self._dbg_no_change,
             "low_conf": self._dbg_low_conf,
             "no_notional": self._dbg_no_notional,
+            "vol_spike_boosted": self._dbg_vol_spike,
         }
 
     def register_entry(self, pos_id: str, condition_id: str, entry_price: float, invested: float = 0.0) -> None:
