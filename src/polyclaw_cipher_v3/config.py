@@ -93,6 +93,7 @@ class NewsLlmConfig(BaseModel):
 
 
 class StrategiesConfig(BaseModel):
+    model_config = {"extra": "allow"}  # v3.5.16: allow experimental strategies
     latency_arb: LatencyArbConfig = Field(default_factory=LatencyArbConfig)
     atomic_arb: AtomicArbConfig = Field(default_factory=AtomicArbConfig)
     resolution_snipe: ResolutionSnipeConfig = Field(default_factory=ResolutionSnipeConfig)

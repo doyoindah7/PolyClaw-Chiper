@@ -42,6 +42,7 @@ from .state.db import Database
 from .state.repository import PositionRepository, SignalRepository, TradeRepository
 from .state.wallet import Wallet, InsufficientFundsError
 from .strategy.atomic_arb import AtomicArbStrategy
+from .strategy.convergence_scalper import ConvergenceScalper
 from .strategy.latency_arb import LatencyArbStrategy
 from .strategy.momentum import MomentumStrategy
 from .strategy.resolution_snipe import ResolutionSnipeStrategy
@@ -101,6 +102,8 @@ class PolyClawCipherV3:
             self.strategies.append(ResolutionSnipeStrategy(s_conf.get("resolution_snipe", {})))
         if s_conf.get("momentum", {}).get("enabled", True):
             self.strategies.append(MomentumStrategy(s_conf.get("momentum", {})))
+        if s_conf.get("convergence_scalper", {}).get("enabled", False):
+            self.strategies.append(ConvergenceScalper(s_conf.get("convergence_scalper", {})))
 
         # Inject feeds
         for s in self.strategies:

@@ -110,6 +110,21 @@ strategies:
         - "https://www.coindesk.com/arc/outboundfeeds/rss/"
         - "https://www.theblock.co/rss.xml"
 
+  # === STRATEGY 6: CONVERGENCE SCALPER (Bone Reaper) ===
+  # v3.5.16: Buy winning token dips <30min before market close
+  # Default disabled — enable per-instance
+  convergence_scalper:
+    enabled: false
+    max_minutes_to_close: 30
+    min_winning_price: 0.97
+    max_entry_price: 0.955
+    take_profit_pct: 5.0
+    stop_loss_pct: 3.0
+    max_position_pct: 0.25
+    max_concurrent: 3
+    min_profit_bps: 50
+    allowed_categories: [crypto, sports_match, sports_total, economics, politics, entertainment, other]
+
 # === RISK MANAGEMENT — Aggressive but Protected ===
 risk:
   initial_bankroll_usd: 25.00
@@ -143,6 +158,10 @@ risk:
       max_consecutive_losses: 3
       max_trades_per_hour: 15
       max_capital_pct: 0.20
+    convergence_scalper:
+      max_consecutive_losses: 3
+      max_trades_per_hour: 20
+      max_capital_pct: 0.30
 
   sizer:
     type: "aggressive_compounding"

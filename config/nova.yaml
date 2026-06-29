@@ -30,10 +30,27 @@ strategies:
     enabled: false
 
   atomic_arb:
-    enabled: false
+    enabled: true                # v3.5.16: Zero-risk YES+NO < $1 arbitrage
+    min_profit_bps: 40
+    max_position_pct: 0.40
+    max_concurrent: 3
 
   resolution_snipe:
     enabled: false
+
+  # === CONVERGENCE SCALPER ("Bone Reaper") ===
+  # v3.5.16: Buy winning token dips near market close
+  convergence_scalper:
+    enabled: true
+    max_minutes_to_close: 30
+    min_winning_price: 0.97
+    max_entry_price: 0.955
+    take_profit_pct: 5.0
+    stop_loss_pct: 3.0
+    max_position_pct: 0.25
+    max_concurrent: 3
+    min_profit_bps: 50
+    allowed_categories: [crypto, sports_match, sports_total, economics, politics, entertainment, other]
 
   # === MOMENTUM (SENSITIVE EXPERIMENT v3.5.16) ===
   # Lower threshold 0.5→0.3 to generate more signals
