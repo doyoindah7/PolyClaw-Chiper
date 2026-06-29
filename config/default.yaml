@@ -21,7 +21,7 @@ market:
 # Edge: PM odds adjust 200-500ms AFTER Binance price move
 strategies:
   latency_arb:
-    enabled: true
+    enabled: false  # v3.5.16: disabled — WR 30%, -$94
     min_edge_pct: 1.0                 # v3.4.4: lowered from 2.0→1.5→1.0 (Kimi+Arena audit — PM efficient, 2% never fires)
     max_position_pct: 0.25            # 25% bankroll per trade (aggressive)
     max_positions: 3

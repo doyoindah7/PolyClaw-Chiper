@@ -1,0 +1,109 @@
+# PolyClaw-Cipher v3.5.15 — Scalper Experiment (Ireland 8086)
+# Ultra-fast scalping: exploit Ireland latency advantage
+# $15 bankroll, tight TP/SL, high frequency, short holds
+
+bot:
+  mode: paper
+  loop_interval_sec: 1
+  scan_interval_sec: 20               # 60→20s — faster market discovery
+  max_open_positions: 8
+
+market:
+  min_volume_24h_usd: 300            # 500→300 — wider net
+  min_liquidity: 50                  # 100→50
+  api_page_size: 500
+  max_pages: 3
+  track_max_markets: 150             # 200→150 — focus
+
+strategies:
+  latency_arb:
+    enabled: false
+
+  atomic_arb:
+    enabled: false
+
+  resolution_snipe:
+    enabled: false
+
+  news_llm:
+    enabled: false
+
+  # CORE: Ultra-Fast Momentum Scalper
+  momentum:
+    enabled: true
+    lookback_short_sec: 15           # 30→15s — faster reaction
+    lookback_long_sec: 60             # 120→60s — tighter window
+    min_momentum_short_pct: 0.3      # 0.5→0.3 — more sensitive
+    min_momentum_long_pct: 0.15      # 0.25→0.15 — more sensitive
+    take_profit_pct: 4.0             # 8→4% — scalp out fast
+    stop_loss_pct: 2.5               # 4→2.5% — cut fast
+    max_hold_sec: 120                 # 300→120s — 2 min max
+    max_position_pct: 0.12           # 0.15→0.12
+    max_positions: 8                  # 6→8 — more concurrent
+    cooldown_sec: 10                 # 30→10s — faster re-entry
+    min_entry_price: 0.15            # 0.30→0.15
+    max_entry_price: 0.90            # 0.95→0.90
+    skip_random_outcome: false
+    allowed_categories: ["crypto", "economics", "sports_total", "other"]
+
+risk:
+  initial_bankroll_usd: 15.00
+  max_daily_drawdown_pct: 35.0
+  max_consecutive_losses_global: 7
+  max_trades_per_hour_global: 80      # 60→80 — higher frequency
+  max_position_age_sec: 600          # 1800→600 — 10 min
+  dead_position_age_sec: 300        # 900→300 — 5 min
+  session_rotation_min: 180
+
+  per_strategy:
+    momentum:
+      max_consecutive_losses: 6
+      max_trades_per_hour: 50
+      max_capital_pct: 0.50
+
+  sizer:
+    type: "aggressive_compounding"
+    cash_min_pct: 10                  # 15→10 — deploy more
+    max_pct_per_trade: 0.15
+    min_position_usd: 0.50
+    dynamic_cash_buffer: true
+    high_deploy_threshold: 0.75
+    high_deploy_reserve: 0.20
+
+execution:
+  paper:
+    slippage_model: "liquidity"
+    slippage_bps: 80
+    slippage_min_bps: 40
+    slippage_max_bps: 600
+    fill_probability_base: 0.68      # 0.72→0.68 — tighter fills
+    fill_probability_volatile: 0.60
+    fill_probability_stable: 0.75
+    fill_probability_at_bid_low: 0.85
+    fill_probability_at_bid_high: 0.50
+    queue_position_factor: 0.5
+    simulated_latency_sec: 0.10       # 0.15→0.10 — Ireland speed
+    on_chain_delay_sec: 2.5
+    on_chain_delay_jitter: 1.5
+    gas_fee_avg_usd: 0.01
+    gas_fee_spike_probability: 0.05
+    gas_fee_spike_usd: 0.10
+    api_rate_limit_per_sec: 15       # 10→15
+    api_throttle_probability: 0.03
+
+monitoring:
+  log_level: INFO
+  log_format: json
+  web:
+    enabled: true
+    host: 0.0.0.0
+    port: 8086
+    username: ""
+    password: ""
+  heartbeat_sec: 5
+  metrics_enabled: true
+
+tier:
+  mode: auto
+  force_tier: 0
+  cooldown_hours: 24
