@@ -1025,6 +1025,11 @@ class PolyClawCipherV3:
                             lat_stats = strat.get_debug_stats()
                             stats['latency_arb_debug'] = lat_stats
                             break
+                    # v3.5.16: Add momentum debug stats for diagnostics
+                    for strat in self.strategies:
+                        if hasattr(strat, 'get_debug_stats') and strat.name == 'momentum':
+                            stats['momentum_debug'] = strat.get_debug_stats()
+                            break
 
 # WALLET INVARIANT CHECK (BUG-1 fix):
                 # bankroll MUST == cash + total_invested. If not, recalculate from DB truth.

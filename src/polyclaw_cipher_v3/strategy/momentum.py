@@ -85,7 +85,10 @@ class MomentumStrategy(BaseStrategy):
         if market.volume_24h < 100:  # v3.5.6: 500->100
             self._dbg_vol_filtered += 1
             return None
-        if market.yes_price < self.min_entry_price or market.yes_price > self.max_entry_price:
+        # v3.5.16 FIX: Use CLOB mid price for entry range check (market.yes_price is stale from Gamma)
+        clob_mid = self._clob.get_price(market.yes_token_id) if self._clob else 0.0
+        check_price = clob_mid if clob_mid > 0 else market.yes_price
+        if check_price < self.min_entry_price or check_price > self.max_entry_price:
             self._dbg_price_filtered += 1
             return None
 
