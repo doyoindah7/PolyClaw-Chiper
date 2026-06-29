@@ -41,6 +41,11 @@ strategies:
     max_position_pct: 0.12           # 0.15→0.12
     max_positions: 8                  # 6→8 — more concurrent
     cooldown_sec: 10                 # 30→10s — faster re-entry
+    # v3.5.16: Volume Spike Detector
+    vol_spike_enabled: true
+    vol_spike_threshold: 3.0
+    vol_spike_boost: 0.15
+    vol_spike_confidence_boost: 0.10
     min_entry_price: 0.15            # 0.30→0.15
     max_entry_price: 0.90            # 0.95→0.90
     skip_random_outcome: false

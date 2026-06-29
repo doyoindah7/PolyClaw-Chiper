@@ -85,8 +85,11 @@ strategies:
     # v3.3.0: Category filter — sports_spread EXCLUDED (random), sports_total ALLOWED (predictable)
     skip_random_outcome: false
     allowed_categories: ["crypto", "sports_match", "sports_total", "sports_spread", "economics", "politics", "entertainment", "other"]
-    # Volume Spike Detector: disabled in default — enable per-instance (nova.yaml)
-    vol_spike_enabled: false
+    # Volume Spike Detector: lowers threshold 15% when tick rate >3x normal
+    vol_spike_enabled: true
+    vol_spike_threshold: 3.0
+    vol_spike_boost: 0.15
+    vol_spike_confidence_boost: 0.10
 
   # === STRATEGY 5: NEWS LLM (DEFERRED — no API key yet) ===
   # Stub interface ready, autoclaw will activate
