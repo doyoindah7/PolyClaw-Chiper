@@ -35,13 +35,15 @@ strategies:
   resolution_snipe:
     enabled: false
 
-  # === MOMENTUM (from Fifteen proven config) ===
+  # === MOMENTUM (SENSITIVE EXPERIMENT v3.5.16) ===
+  # Lower threshold 0.5→0.3 to generate more signals
+  # Compare vs Cipher/Fifteen to see WR impact
   momentum:
     enabled: true
     lookback_short_sec: 30
     lookback_long_sec: 120
-    min_momentum_short_pct: 0.5
-    min_momentum_long_pct: 0.25
+    min_momentum_short_pct: 0.3   # v3.5.16 EXPERIMENT: 0.5→0.3 (more sensitive)
+    min_momentum_long_pct: 0.15   # v3.5.16 EXPERIMENT: 0.25→0.15
     take_profit_pct: 8.0           # Auto-tune will adjust
     stop_loss_pct: 7.6             # From auto-tune (median loss 6.3%)
     max_hold_sec: 60               # From auto-tune (94% profit <1min)

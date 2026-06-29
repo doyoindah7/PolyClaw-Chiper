@@ -576,8 +576,12 @@ class PolyClawCipherV3:
                 ).fetchall()
                 db.close()
                 if len(rows) < 20:
-                    logger.info("Auto-tune: only %d trades in master DB for %s — need 20+",
+                    logger.info("Auto-tune: only %d trades in master DB for %s — using ALL instances",
                                len(rows), instance_label)
+                    db = sqlite3.connect(str(master_path))
+                    db.row_factory = sqlite3.Row
+                    rows = db.execute("SELECT * FROM trades ORDER BY closed_at").fetchall()
+                    db.close()
                 else:
                     logger.info("Auto-tune: master DB has %d trades for %s", len(rows), instance_label)
             else:

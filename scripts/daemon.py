@@ -332,7 +332,15 @@ def run_bot() -> subprocess.Popen:
 # ── Watchdog Checks ──────────────────────────────────────────────────────
 
 def check_signal_starvation(host: str, port: int) -> None:
-    """v3.5.15: Check signal starvation + execution failure via /api/stats (db_stats returns 403)."""
+    """v3.5.16: Smart stagnation detection — reports root cause, not just symptom.
+    
+    Categories detected:
+    - price_filtered: stale market prices (most common after restart)
+    - no_change: market flat, no momentum
+    - risk_blocked: signals exist but risk manager blocks trades
+    - execution_broken: signals generating but 0 trades + 0 positions
+    - cooldown_blocked: signals hit cooldown (strategy working but saturated)
+    """
     import urllib.request
     try:
         url = f"http://{host}:{port}/api/stats"
@@ -353,11 +361,68 @@ def check_signal_starvation(host: str, port: int) -> None:
         total_trades = stats.get("trades", 0)
         open_positions = stats.get("open_positions", [])
 
-        # Per-strategy starvation check
+        # v3.5.16: Momentum debug diagnostics
+        mom_debug = stats.get("momentum_debug", {})
+        if mom_debug:
+            evaluated = mom_debug.get("evaluated", 0)
+            signals = mom_debug.get("signals", 0)
+            price_filtered = mom_debug.get("price_filtered", 0)
+            no_change = mom_debug.get("no_change", 0)
+            cooldown = mom_debug.get("cooldown", 0)
+            one_per_mkt = mom_debug.get("one_per_mkt", 0)
+            max_pos = mom_debug.get("max_pos", 0)
+            low_conf = mom_debug.get("low_conf", 0)
+            cat_filtered = mom_debug.get("cat_filtered", 0)
+            vol_filtered = mom_debug.get("vol_filtered", 0)
+            total_eval = evaluated + price_filtered + no_change + cooldown + one_per_mkt + max_pos + low_conf + cat_filtered + vol_filtered + signals
+            
+            if total_eval > 0 and signals == 0 and evaluated > 50:
+                # Diagnostic: what's the dominant filter?
+                filters = [
+                    ("price_filtered (stale prices?)", price_filtered),
+                    ("no_change (flat markets)", no_change),
+                    ("cooldown (strategy saturated)", cooldown),
+                    ("one_per_mkt (markets busy)", one_per_mkt),
+                    ("max_pos (position limit)", max_pos),
+                    ("low_conf (confidence filter)", low_conf),
+                    ("cat_filtered (category)", cat_filtered),
+                    ("vol_filtered (low volume)", vol_filtered),
+                ]
+                dominant = sorted(filters, key=lambda x: -x[1])[0]
+                if dominant[1] > 0:
+                    pct = dominant[1] / total_eval * 100
+                    logger.warning(
+                        "SignalCheck: port %d 0 signals after %d eval | dominan: %s (%d/%d = %.0f%%)",
+                        port, evaluated, dominant[0], dominant[1], total_eval, pct
+                    )
+                    if price_filtered > total_eval * 0.7:
+                        send_tg_alert("stale_prices",
+                            f"⚠️ Port {port}: {pct:.0f}% markets filtered by price — CLOB/Gamma sync issue?\n"
+                            f"Evaluated: {evaluated} | Price filtered: {price_filtered}\n"
+                            f"Consider restart if >80% persists.",
+                            cooldown_sec=1800)
+
+            elif signals > 0:
+                logger.debug("SignalCheck: port %d active — %d signals, %d evaluated",
+                           port, signals, evaluated)
+
+        # Per-strategy starvation check (legacy)
         for strat in ["momentum", "atomic_arb", "latency_arb", "resolution_snipe"]:
             n = per_strategy.get(strat, 0)
-            if n == 0:
-                logger.info("SignalCheck: %s emitted 0 signals this session", strat)
+            if n == 0 and strat == "momentum":
+                # Enhanced: check if it's market or config
+                if mom_debug:
+                    ev = mom_debug.get("evaluated", 0)
+                    pf = mom_debug.get("price_filtered", 0)
+                    nc = mom_debug.get("no_change", 0)
+                    if pf > ev * 3:
+                        logger.info("SignalCheck: momentum dead — price_filtered dominates (%d vs %d eval)", pf, ev)
+                    elif nc > ev:
+                        logger.info("SignalCheck: momentum dead — market flat, no momentum detected")
+                    else:
+                        logger.info("SignalCheck: momentum emitted 0 signals this session")
+                else:
+                    logger.info("SignalCheck: momentum emitted 0 signals this session")
 
         # Execution failure: signals increasing but trades not increasing
         # v3.5.15: Track delta signals vs delta trades (not absolute 0)
