@@ -1,23 +1,12 @@
-"""Auto-healing daemon v3.5.15 — monitors bot process, restarts on crash. 24/7 reliable.
+"""Auto-healing daemon v3.5.17 — trigger-based pipeline health.
 
-v3.5.15 fixes:
-- check_signal_starvation now uses /api/stats (db_stats returns 403)
-- Configurable thresholds via env vars: STAGNATION_THRESHOLD_MIN, STAGNATION_CHECK_INTERVAL
-- Execution failure alert: 20+ signals, 0 trades, 0 open positions
-- Container memory check uses dynamic container name
+Design:
+- CRITICAL (10s): bot crash, HTTP dead, CLOB WS dead → immediate restart + alert
+- TRIGGER (60s poll): 15 min no new trades OR 15 min bankroll unchanged → pipeline trace
+- PIPELINE TRACE: 9-step checklist, combined alert (30 min cooldown)
+- SILENT: bot trading normally → daemon stays quiet
 
-v3.5.14 fixes:
-- CLOB WS data freshness check (last_msg_age_sec > 120 = stale → restart)
-- Real TG alerts (sends to @polyclawchiper_bot on critical events)
-- Fixed stagnation detector field names (signals_emitted, total_trades)
-- CLOB WS error count tracking (auto-restart if >20 errors in 5 min)
-- Dashboard status accuracy (writes status JSON for HTTP server)
-
-v3.3.0 daemon improvements:
-- NEVER give up: after crash loop threshold, switch to 5-min intervals (not exit)
-- Deep health check: verify HTTP /api/health AND WS status via /api/stats
-- Signal handling: graceful shutdown on SIGTERM/SIGINT
-- Disk space check: warn if disk > 90% full
+Replaces v3.5.15's polling-everything approach with event-driven design.
 """
 from __future__ import annotations
 
@@ -38,488 +27,335 @@ logging.basicConfig(
 )
 logger = logging.getLogger("daemon")
 
-# ── TG Alert System ──────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
-TG_ALERT_COOLDOWN: dict[str, float] = {}  # alert_type → last_sent_timestamp
+PORT = int(os.environ.get("HTTP_PORT", "8082"))
+HEALTH_HOST = "127.0.0.1"
+BOT_LABEL = os.environ.get("BOT_LABEL", f"port-{PORT}")
+CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "polyclaw-cipher-v3")
+
+TRIGGER_MINUTES = 15          # no new trades / bankroll unchanged threshold
+TRIGGER_POLL_SEC = 60         # how often to check triggers
+CRITICAL_CHECK_SEC = 10       # how often to check critical health
+PIPELINE_ALERT_COOLDOWN = 1800  # 30 min between combined pipeline alerts
+STARTUP_GRACE_SEC = 30        # skip checks during startup
+
+# ── TG Alert ─────────────────────────────────────────────────────────────
+_ALERT_COOLDOWNS: dict[str, float] = {}
 
 
-def send_tg_alert(alert_type: str, message: str, cooldown_sec: float = 300.0) -> None:
-    """Send Telegram alert with cooldown to prevent spam."""
+def send_tg(alert_type: str, message: str, cooldown: float = 300.0) -> None:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        logger.debug("TG: no token/chat_id configured, skipping alert: %s", alert_type)
         return
-
     now = time.time()
-    last_sent = TG_ALERT_COOLDOWN.get(alert_type, 0)
-    if now - last_sent < cooldown_sec:
-        return  # Cooldown active
-
-    TG_ALERT_COOLDOWN[alert_type] = now
-
+    last = _ALERT_COOLDOWNS.get(alert_type, 0)
+    if now - last < cooldown:
+        return
+    _ALERT_COOLDOWNS[alert_type] = now
     try:
         import urllib.request
         url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
         payload = json.dumps({
             "chat_id": TG_CHAT_ID,
-            "text": f"🔍 PolyClaw Alert\n\n{message}",
+            "text": f"🔍 {BOT_LABEL}\n\n{message}",
             "parse_mode": "HTML",
         }).encode()
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
                 logger.info("TG alert sent: %s", alert_type)
-            else:
-                logger.warning("TG alert failed: HTTP %d", resp.status)
     except Exception as e:
         logger.warning("TG alert failed: %s", e)
 
 
-# ── Health Checks ────────────────────────────────────────────────────────
+# ── API helpers ──────────────────────────────────────────────────────────
 
-def health_check_ok(host: str = "127.0.0.1", port: int = 8082, timeout: float = 3.0) -> bool:
-    """Check if bot HTTP server is responding."""
+def _get(path: str, timeout: float = 5.0) -> dict | None:
     import urllib.request
     try:
-        url = f"http://{host}:{port}/api/health"
+        url = f"http://{HEALTH_HOST}:{PORT}{path}"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _health_ok() -> bool:
+    import urllib.request
+    try:
+        url = f"http://{HEALTH_HOST}:{PORT}/api/health"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
             return resp.status == 200
     except Exception:
         return False
 
 
-def deep_health_check(host: str = "127.0.0.1", port: int = 8082, timeout: float = 5.0) -> tuple[bool, str]:
-    """Deep health check — HTTP + WS status + data freshness."""
-    import urllib.request
-    try:
-        # Check 1: basic HTTP health
-        url = f"http://{host}:{port}/api/health"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return False, f"HTTP {resp.status}"
+# ── Critical Check (every 10s) ───────────────────────────────────────────
 
-        # Check 2: WS status via /api/stats
-        url2 = f"http://{host}:{port}/api/stats"
-        req2 = urllib.request.Request(url2)
-        with urllib.request.urlopen(req2, timeout=timeout) as resp2:
-            if resp2.status != 200:
-                return False, f"stats HTTP {resp2.status}"
-            stats = json.loads(resp2.read().decode())
-
-        ws = stats.get("ws_status", {})
-        if not ws.get("clob_connected", False):
-            return False, "CLOB WS disconnected"
-        if not ws.get("binance_connected", False):
-            return False, "Binance WS disconnected"
-
-        clob_tokens = ws.get("clob_tokens", 0)
-        if clob_tokens == 0:
-            return False, "CLOB WS: 0 tokens tracked"
-
-        # v3.5.14: Check data freshness — if last CLOB message > 120s ago, data is stale
-        clob_last_msg = ws.get("clob_last_msg_sec", 0)
-        if clob_last_msg > 120:
-            return False, f"CLOB WS stale (no data for {int(clob_last_msg)}s)"
-
-        return True, f"OK (clob={clob_tokens} tokens, uptime={stats.get('uptime_sec',0)}s)"
-
-    except Exception as e:
-        return False, f"check failed: {e}"
+def critical_check() -> tuple[bool, str]:
+    """Returns (ok, reason). If not ok → restart bot immediately."""
+    # 1. HTTP alive
+    if not _health_ok():
+        return False, "HTTP server not responding"
+    # 2. CLOB WS alive + fresh
+    stats = _get("/api/stats")
+    if stats is None:
+        return False, "/api/stats not responding"
+    ws = stats.get("ws_status", {})
+    if not ws.get("clob_connected", False):
+        return False, "CLOB WS disconnected"
+    clob_tokens = ws.get("clob_tokens", 0)
+    if clob_tokens == 0:
+        return False, "CLOB WS: 0 tokens tracked"
+    clob_last_msg = ws.get("clob_last_msg_sec", 0)
+    if clob_last_msg > 120:
+        return False, f"CLOB WS stale ({int(clob_last_msg)}s no data)"
+    return True, "OK"
 
 
-def check_disk_space(path: str = "/app", threshold: float = 0.90) -> tuple[bool, float]:
-    try:
-        usage = shutil.disk_usage(path)
-        return usage.used / usage.total < threshold, usage.used / usage.total
-    except Exception:
-        return True, 0.0
+# ── 9-Step Pipeline Trace ────────────────────────────────────────────────
 
-
-def kill_bot_gracefully(proc: subprocess.Popen, timeout: float = 10.0) -> None:
-    logger.info("Sending SIGTERM to bot for graceful shutdown...")
-    proc.terminate()
-    try:
-        proc.wait(timeout=timeout)
-        logger.info("Bot exited gracefully.")
-    except subprocess.TimeoutExpired:
-        logger.warning("Bot did not exit within %.1fs, forcing SIGKILL...", timeout)
-        proc.kill()
-        proc.wait()
-
-
-# ── Stagnation Detector ──────────────────────────────────────────────────
-
-class StagnationDetector:
-    """Track state deltas to detect bot inactivity."""
-
-    def __init__(self):
-        self.history: dict[str, list[tuple[float, float]]] = {
-            "bankroll": [],
-            "trades": [],
-            "signals": [],
-        }
-        self.last_stagnant_restart: float = 0.0
-        self.stagnation_cooldown: float = 1800.0  # 30 min
-
-    def record(self, stats: dict) -> None:
-        now = time.time()
-        # v3.5.15: Fixed field name — API returns 'trades' not 'total_trades'
-        bankroll = stats.get("bankroll", 0)
-        total_trades = stats.get("trades", 0)
-        # Sum signals across all strategies
-        total_signals = 0
-        for s in stats.get("strategies", []):
-            if isinstance(s, dict):
-                total_signals += s.get("signals_emitted", 0)
-
-        self.history["bankroll"].append((now, bankroll))
-        self.history["trades"].append((now, total_trades))
-        self.history["signals"].append((now, total_signals))
-
-        cutoff = now - 7200
-        for key in self.history:
-            self.history[key] = [(ts, v) for ts, v in self.history[key] if ts > cutoff]
-
-    def is_stagnant(self, stats: dict, threshold_min: int = 15) -> tuple[bool, str]:
-        now = time.time()
-        threshold = threshold_min * 60
-        signal_threshold = max(threshold * 3, 300)  # 3x threshold or min 5 min
-
-        for key in self.history:
-            if len(self.history[key]) < 3:
-                return False, "insufficient data"
-
-        def _find_oldest_within(hist: list, window_sec: float) -> tuple[float, float] | None:
-            """Find the oldest entry within window_sec from the latest entry."""
-            if not hist:
-                return None
-            latest_ts = hist[-1][0]
-            cutoff = latest_ts - window_sec
-            # Find first entry at or after cutoff
-            for ts, val in hist:
-                if ts >= cutoff:
-                    return (ts, val)
-            return hist[0]  # fallback to oldest
-
-        open_positions = stats.get("open_positions", [])
-        has_open = len(open_positions) > 0
-
-        # Check 1: Bankroll unchanged for threshold_min
-        br_hist = self.history["bankroll"]
-        br_old = _find_oldest_within(br_hist, threshold)
-        if br_old and not has_open:
-            if abs(br_hist[-1][1] - br_old[1]) < 0.01:
-                return True, f"Bankroll unchanged for {threshold_min}m (stuck at ${br_hist[-1][1]:.2f})"
-
-        # Check 2: No new trades for threshold_min (when bankroll > $30)
-        bankroll = stats.get("bankroll", 0)
-        tr_hist = self.history["trades"]
-        tr_old = _find_oldest_within(tr_hist, threshold)
-        if tr_old and bankroll > 30:
-            if tr_hist[-1][1] == tr_old[1]:
-                if has_open:
-                    return True, f"No new trades for {threshold_min}m with {len(open_positions)} stuck open positions"
-                return True, f"No new trades for {threshold_min}m (trades stuck at {int(tr_hist[-1][1])})"
-
-        # Check 3: No new signals for signal_threshold
-        sig_hist = self.history["signals"]
-        sig_old = _find_oldest_within(sig_hist, signal_threshold)
-        if sig_old:
-            if sig_hist[-1][1] == sig_old[1]:
-                return True, f"No new signals for {signal_threshold//60}m (strategies may be dead)"
-
-        # Check 4: All strategies disabled
-        disabled = stats.get("risk", {}).get("disabled_strategies", [])
-        if len(disabled) >= 3:
-            return True, f"All strategies disabled: {disabled}"
-
-        # Check 5: 0 markets tracked
-        markets = stats.get("markets", 0)
-        if markets == 0:
-            return True, "0 markets tracked (scanner dead?)"
-
-        if has_open:
-            return False, f"OK (have {len(open_positions)} open positions, signals flowing)"
-        return False, "OK"
-
-    def should_restart(self, stats: dict, threshold_min: int = 15) -> tuple[bool, str]:
-        stagnant, reason = self.is_stagnant(stats, threshold_min)
-        if not stagnant:
-            return False, "OK"
-        now = time.time()
-        if now - self.last_stagnant_restart < self.stagnation_cooldown:
-            remaining = int((self.stagnation_cooldown - (now - self.last_stagnant_restart)) // 60)
-            return False, f"Stagnation detected but cooldown active ({remaining}m left)"
-        self.last_stagnant_restart = now
-        return True, reason
-
-
-# ── CLOB WS Error Tracker ────────────────────────────────────────────────
-
-class CLOBErrorTracker:
-    """v3.5.14: Track CLOB WS reconnection errors — auto-restart if too many."""
-
-    def __init__(self, max_errors: int = 15, window_sec: float = 300):
-        self.max_errors = max_errors
-        self.window_sec = window_sec
-        self.errors: list[float] = []
-        self.last_count = 0
-
-    def check(self, host: str, port: int) -> tuple[bool, str]:
-        """Check CLOB WS error count from logs. Returns (should_restart, reason)."""
-        import urllib.request
-        try:
-            url = f"http://{host}:{port}/api/stats"
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                stats = json.loads(resp.read().decode())
-
-            ws = stats.get("ws_status", {})
-            clob_errors = ws.get("clob_reconnect_count", 0)
-
-            if clob_errors > self.last_count:
-                new_errors = clob_errors - self.last_count
-                now = time.time()
-                self.errors.extend([now] * new_errors)
-                self.last_count = clob_errors
-
-            # Prune old errors
-            cutoff = time.time() - self.window_sec
-            self.errors = [t for t in self.errors if t > cutoff]
-
-            if len(self.errors) >= self.max_errors:
-                return True, f"CLOB WS {len(self.errors)} reconnects in {self.window_sec}s (threshold {self.max_errors})"
-
-            return False, f"CLOB WS errors: {len(self.errors)}/{self.max_errors} in {self.window_sec}s"
-        except Exception as e:
-            return False, f"CLOB error check failed: {e}"
-
-
-# ── Bot Process Management ───────────────────────────────────────────────
-
-_shutdown_requested = False
-_wal_alert_cooldown: float = 0.0
-_disk_cleanup_cooldown: float = 0.0
-
-
-def signal_handler(signum, frame):
-    global _shutdown_requested
-    sig_name = signal.Signals(signum).name
-    logger.info("Received %s — initiating graceful shutdown", sig_name)
-    _shutdown_requested = True
-
-
-def run_bot() -> subprocess.Popen:
-    env = dict(os.environ)
-    env["PYTHONPATH"] = "/app/src"
-    cmd = [sys.executable, "-m", "polyclaw_cipher_v3"]
-    logger.info("Starting bot: %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd="/app")
-
-    def log_output():
-        for line in iter(proc.stdout.readline, b""):
-            sys.stdout.write(line.decode())
-            sys.stdout.flush()
-
-    import threading
-    t = threading.Thread(target=log_output, daemon=True)
-    t.start()
-    return proc
-
-
-# ── Watchdog Checks ──────────────────────────────────────────────────────
-
-def check_signal_starvation(host: str, port: int) -> None:
-    """v3.5.16: Smart stagnation detection — reports root cause, not just symptom.
+def pipeline_trace(stats: dict, prev_state: dict) -> tuple[list[str], list[str]]:
+    """Run 9-step pipeline health check.
     
-    Categories detected:
-    - price_filtered: stale market prices (most common after restart)
-    - no_change: market flat, no momentum
-    - risk_blocked: signals exist but risk manager blocks trades
-    - execution_broken: signals generating but 0 trades + 0 positions
-    - cooldown_blocked: signals hit cooldown (strategy working but saturated)
+    Returns (issues, passes) — lists of diagnostic messages.
     """
-    import urllib.request
-    try:
-        url = f"http://{host}:{port}/api/stats"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            stats = json.loads(resp.read().decode())
+    issues = []
+    passes = []
 
-        # Extract signal/trade data from stats
-        total_signals = 0
-        per_strategy = {}
-        for s in stats.get("strategies", []):
-            if isinstance(s, dict):
-                n = s.get("signals_emitted", 0)
-                name = s.get("name", "unknown")
-                per_strategy[name] = n
-                total_signals += n
+    # Step 1: Config loaded — strategies not empty
+    strategies = []
+    for s in stats.get("strategies", []):
+        if isinstance(s, dict):
+            strategies.append(s.get("name", "?"))
+    if not strategies:
+        issues.append("⚠️ Step 1: Strategies loaded = [] — config broken!")
+    else:
+        passes.append(f"✅ Step 1: Strategies = {strategies}")
 
-        total_trades = stats.get("trades", 0)
-        open_positions = stats.get("open_positions", [])
+    # Step 2: Markets scanned
+    markets = stats.get("markets", 0)
+    if markets == 0:
+        issues.append("⚠️ Step 2: 0 markets — scanner dead?")
+    else:
+        # Check category distribution
+        cats = stats.get("categories", {})
+        if cats:
+            cat_summary = ", ".join(f"{k}={v}" for k, v in sorted(cats.items(), key=lambda x: -x[1])[:5])
+            passes.append(f"✅ Step 2: {markets} markets ({cat_summary})")
+        else:
+            passes.append(f"✅ Step 2: {markets} markets")
 
-        # v3.5.16: Momentum debug diagnostics
-        mom_debug = stats.get("momentum_debug", {})
-        if mom_debug:
-            evaluated = mom_debug.get("evaluated", 0)
-            signals = mom_debug.get("signals", 0)
-            price_filtered = mom_debug.get("price_filtered", 0)
-            no_change = mom_debug.get("no_change", 0)
-            cooldown = mom_debug.get("cooldown", 0)
-            one_per_mkt = mom_debug.get("one_per_mkt", 0)
-            max_pos = mom_debug.get("max_pos", 0)
-            low_conf = mom_debug.get("low_conf", 0)
-            cat_filtered = mom_debug.get("cat_filtered", 0)
-            vol_filtered = mom_debug.get("vol_filtered", 0)
-            total_eval = evaluated + price_filtered + no_change + cooldown + one_per_mkt + max_pos + low_conf + cat_filtered + vol_filtered + signals
+    # Step 3: CLOB WS alive
+    ws = stats.get("ws_status", {})
+    clob_tokens = ws.get("clob_tokens", 0)
+    clob_last = ws.get("clob_last_msg_sec", 999)
+    if clob_tokens > 0 and clob_last < 120:
+        passes.append(f"✅ Step 3: CLOB {clob_tokens} tokens, last msg {int(clob_last)}s ago")
+    else:
+        issues.append(f"⚠️ Step 3: CLOB WS issue — tokens={clob_tokens}, last_msg={int(clob_last)}s")
+
+    # Step 4: Binance WS alive
+    binance_ok = ws.get("binance_connected", False)
+    if binance_ok:
+        passes.append("✅ Step 4: Binance WS connected")
+    else:
+        issues.append("⚠️ Step 4: Binance WS disconnected")
+
+    # Step 5: Eval cycle running
+    mom = stats.get("momentum_debug", {})
+    evaluated = mom.get("evaluated", 0)
+    prev_evaluated = prev_state.get("evaluated", 0)
+    if evaluated > prev_evaluated:
+        passes.append(f"✅ Step 5: Eval running ({evaluated} total, +{evaluated - prev_evaluated} since last check)")
+    elif evaluated > 0:
+        issues.append(f"⚠️ Step 5: Eval count stuck at {evaluated} — strategy loop frozen?")
+    else:
+        issues.append("⚠️ Step 5: 0 evaluations — strategy not running")
+
+    # Step 6: Signals generating
+    mom_signals = mom.get("signals", 0)
+    total_signals = sum(s.get("signals_emitted", 0) for s in stats.get("strategies", []) if isinstance(s, dict))
+    
+    if total_signals > 0 or mom_signals > 0:
+        passes.append(f"✅ Step 6: {total_signals} signals emitted ({mom_signals} from momentum)")
+    else:
+        # Diagnostic: why 0 signals?
+        eval_count = mom.get("evaluated", 0)
+        if eval_count > 50:
+            filters = [
+                ("price_filtered", mom.get("price_filtered", 0)),
+                ("no_change", mom.get("no_change", 0)),
+                ("cat_filtered", mom.get("cat_filtered", 0)),
+                ("cooldown", mom.get("cooldown", 0)),
+                ("max_pos", mom.get("max_pos", 0)),
+                ("low_conf", mom.get("low_conf", 0)),
+                ("one_per_mkt", mom.get("one_per_mkt", 0)),
+                ("vol_filtered", mom.get("vol_filtered", 0)),
+            ]
+            total_filtered = sum(v for _, v in filters)
+            dominant = sorted(filters, key=lambda x: -x[1])[0]
+            pct = dominant[1] / max(total_filtered, 1) * 100
+            issues.append(
+                f"⚠️ Step 6: 0 signals from {eval_count} evals — "
+                f"dominant filter: {dominant[0]} ({pct:.0f}%)"
+            )
+        else:
+            issues.append(f"⚠️ Step 6: 0 signals (only {eval_count} evals — still warming up?)")
+
+    # Step 7: Risk gate passing
+    total_trades = stats.get("trades", 0)
+    open_positions = stats.get("open_positions", [])
+    disabled = stats.get("risk", {}).get("disabled_strategies", [])
+    
+    if disabled and len(disabled) >= 2:
+        issues.append(f"⚠️ Step 7: {len(disabled)} strategies disabled by risk: {disabled}")
+    elif total_signals > 20 and total_trades == 0 and not open_positions:
+        issues.append(f"⚠️ Step 7: {total_signals} signals but 0 trades — risk gate blocking everything")
+    else:
+        passes.append(f"✅ Step 7: Risk gate OK ({total_trades} trades, {len(open_positions)} open, disabled={disabled})")
+
+    # Step 8: Positions managed
+    if open_positions:
+        passes.append(f"✅ Step 8: {len(open_positions)} open positions tracked")
+    elif total_trades > 0:
+        passes.append("✅ Step 8: No open positions (all closed)")
+    else:
+        passes.append("✅ Step 8: No positions yet (bot may be starting)")
+
+    # Step 9: Bankroll moving
+    bankroll = stats.get("bankroll", 0)
+    prev_bankroll = prev_state.get("bankroll", bankroll)
+    if abs(bankroll - prev_bankroll) > 0.01:
+        passes.append(f"✅ Step 9: Bankroll ${bankroll:.2f} (was ${prev_bankroll:.2f})")
+    else:
+        issues.append(f"⚠️ Step 9: Bankroll stuck at ${bankroll:.2f}")
+
+    return issues, passes
+
+
+# ── Trigger Tracker ──────────────────────────────────────────────────────
+
+class TriggerTracker:
+    """Track when to trigger pipeline trace."""
+    
+    def __init__(self):
+        self.last_trade_count = -1
+        self.last_trade_time = time.time()
+        self.last_bankroll = -1.0
+        self.last_bankroll_time = time.time()
+        self.prev_pipeline_state: dict = {}
+        self.last_pipeline_alert = 0.0
+    
+    def update(self, stats: dict) -> tuple[bool, str]:
+        """Check if pipeline trace should run. Returns (should_trace, reason)."""
+        now = time.time()
+        
+        # Track trade count
+        trades = stats.get("trades", 0)
+        if self.last_trade_count < 0:
+            self.last_trade_count = trades
+        elif trades > self.last_trade_count:
+            self.last_trade_count = trades
+            self.last_trade_time = now
+        
+        # Track bankroll
+        bankroll = stats.get("bankroll", 0)
+        if self.last_bankroll < 0:
+            self.last_bankroll = bankroll
+        elif abs(bankroll - self.last_bankroll) > 0.01:
+            self.last_bankroll = bankroll
+            self.last_bankroll_time = now
+        
+        # Check triggers
+        no_trade_sec = now - self.last_trade_time
+        no_bankroll_sec = now - self.last_bankroll_time
+        
+        if no_trade_sec >= TRIGGER_MINUTES * 60:
+            return True, f"no new trades for {int(no_trade_sec // 60)}m"
+        if no_bankroll_sec >= TRIGGER_MINUTES * 60:
+            return True, f"bankroll unchanged for {int(no_bankroll_sec // 60)}m"
+        
+        return False, ""
+    
+    def run_trace(self, stats: dict) -> None:
+        """Run pipeline trace and send combined alert if needed."""
+        issues, passes = pipeline_trace(stats, self.prev_pipeline_state)
+        
+        # Update prev state for next trace
+        self.prev_pipeline_state = {
+            "evaluated": stats.get("momentum_debug", {}).get("evaluated", 0),
+            "bankroll": stats.get("bankroll", 0),
+        }
+        
+        if issues:
+            now = time.time()
+            if now - self.last_pipeline_alert < PIPELINE_ALERT_COOLDOWN:
+                remaining = int((PIPELINE_ALERT_COOLDOWN - (now - self.last_pipeline_alert)) // 60)
+                logger.info("Pipeline: %d issues found but alert cooldown (%dm left)", len(issues), remaining)
+                return
             
-            if total_eval > 0 and signals == 0 and evaluated > 50:
-                # Diagnostic: what's the dominant filter?
-                filters = [
-                    ("price_filtered (stale prices?)", price_filtered),
-                    ("no_change (flat markets)", no_change),
-                    ("cooldown (strategy saturated)", cooldown),
-                    ("one_per_mkt (markets busy)", one_per_mkt),
-                    ("max_pos (position limit)", max_pos),
-                    ("low_conf (confidence filter)", low_conf),
-                    ("cat_filtered (category)", cat_filtered),
-                    ("vol_filtered (low volume)", vol_filtered),
-                ]
-                dominant = sorted(filters, key=lambda x: -x[1])[0]
-                if dominant[1] > 0:
-                    pct = dominant[1] / total_eval * 100
-                    logger.warning(
-                        "SignalCheck: port %d 0 signals after %d eval | dominan: %s (%d/%d = %.0f%%)",
-                        port, evaluated, dominant[0], dominant[1], total_eval, pct
-                    )
-                    if price_filtered > total_eval * 0.7:
-                        send_tg_alert("stale_prices",
-                            f"⚠️ Port {port}: {pct:.0f}% markets filtered by price — CLOB/Gamma sync issue?\n"
-                            f"Evaluated: {evaluated} | Price filtered: {price_filtered}\n"
-                            f"Consider restart if >80% persists.",
-                            cooldown_sec=1800)
-
-            elif signals > 0:
-                logger.debug("SignalCheck: port %d active — %d signals, %d evaluated",
-                           port, signals, evaluated)
-
-        # Per-strategy starvation check (legacy)
-        for strat in ["momentum", "atomic_arb", "latency_arb", "resolution_snipe"]:
-            n = per_strategy.get(strat, 0)
-            if n == 0 and strat == "momentum":
-                # Enhanced: check if it's market or config
-                if mom_debug:
-                    ev = mom_debug.get("evaluated", 0)
-                    pf = mom_debug.get("price_filtered", 0)
-                    nc = mom_debug.get("no_change", 0)
-                    if pf > ev * 3:
-                        logger.info("SignalCheck: momentum dead — price_filtered dominates (%d vs %d eval)", pf, ev)
-                    elif nc > ev:
-                        logger.info("SignalCheck: momentum dead — market flat, no momentum detected")
-                    else:
-                        logger.info("SignalCheck: momentum emitted 0 signals this session")
-                else:
-                    logger.info("SignalCheck: momentum emitted 0 signals this session")
-
-        # Execution failure: signals increasing but trades not increasing
-        # v3.5.15: Track delta signals vs delta trades (not absolute 0)
-        # If 20+ new signals but 0 new trades and 0 open positions → execution broken
-        if not hasattr(check_signal_starvation, '_last_signals'):
-            check_signal_starvation._last_signals = total_signals
-            check_signal_starvation._last_trades = total_trades
-        delta_signals = total_signals - check_signal_starvation._last_signals
-        delta_trades = total_trades - check_signal_starvation._last_trades
-        check_signal_starvation._last_signals = total_signals
-        check_signal_starvation._last_trades = total_trades
-
-        if delta_signals > 20 and delta_trades == 0 and len(open_positions) == 0:
-            logger.error("SignalCheck: %d new signals but 0 new trades — execution issue?", delta_signals)
-            send_tg_alert("execution_failure",
-                f"🚨 Execution issue: {delta_signals} new signals, 0 new trades, 0 open positions\nPort: {port}\nRisk gate may be blocking all trades.",
-                cooldown_sec=600)
-
-        # High rejection proxy: if 50+ new signals but 0 new trades, likely high rejection
-        if delta_signals > 50 and delta_trades == 0:
-            logger.warning("SignalCheck: %d new signals, 0 new trades — check risk config", delta_signals)
-            send_tg_alert("high_rejection",
-                f"⚠️ Signal/trade imbalance: {delta_signals} new signals, 0 new trades\nPort: {port}\nRisk gate may be too tight.",
-                cooldown_sec=600)
-
-    except Exception as e:
-        logger.debug("SignalCheck failed: %s", e)
+            self.last_pipeline_alert = now
+            
+            # Build combined alert
+            msg_lines = [f"📋 Pipeline Trace — {int(time.time())} issues found:\n"]
+            for issue in issues:
+                msg_lines.append(issue)
+            msg_lines.append(f"\n✅ {len(passes)} checks passed:")
+            for p in passes:
+                msg_lines.append(p)
+            
+            alert_msg = "\n".join(msg_lines)
+            logger.warning("Pipeline trace triggered:\n%s", alert_msg)
+            send_tg("pipeline_trace", alert_msg, cooldown=PIPELINE_ALERT_COOLDOWN)
+        else:
+            logger.info("Pipeline trace: all 9 steps passed ✅")
 
 
-def check_cash_deployment(host: str, port: int) -> None:
-    import urllib.request
-    try:
-        url = f"http://{host}:{port}/api/stats"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            stats = json.loads(resp.read().decode())
+# ── Resource Check ───────────────────────────────────────────────────────
 
-        bankroll = stats.get("bankroll", 0.0)
-        cash = stats.get("cash", 0.0)
-        if bankroll <= 0:
-            return
-
-        cash_pct = cash / bankroll
-        if cash_pct < 0.01:
-            logger.error("CashCheck: CRITICAL — cash=$%.2f (%.1f%%)", cash, cash_pct * 100)
-        elif cash_pct < 0.05:
-            logger.warning("CashCheck: over-deployed — cash=$%.2f (%.1f%%)", cash, cash_pct * 100)
-    except Exception as e:
-        logger.debug("CashCheck failed: %s", e)
+_wal_alert_cooldown = 0.0
+_disk_cleanup_cooldown = 0.0
 
 
-def check_resources(host: str, port: int) -> None:
-    import subprocess as sp
+def check_resources() -> None:
     global _wal_alert_cooldown, _disk_cleanup_cooldown
     now = time.time()
-
-    # WAL file size
+    
+    # WAL file
+    wal_path = "/app/data/cipher_v3.db-wal"
+    if os.path.exists(wal_path):
+        wal_mb = os.path.getsize(wal_path) / (1024 * 1024)
+        if wal_mb > 5.0 and now - _wal_alert_cooldown > 600:
+            logger.warning("WAL file %.1fMB — checkpointing", wal_mb)
+            try:
+                stats = _get("/api/admin/wal_checkpoint", timeout=10.0)
+                _wal_alert_cooldown = now
+            except Exception:
+                _wal_alert_cooldown = now
+    
+    # Disk space
     try:
-        wal_path = "/app/data/cipher_v3.db-wal"
-        if os.path.exists(wal_path):
-            wal_mb = os.path.getsize(wal_path) / (1024 * 1024)
-            if wal_mb > 5.0 and now - _wal_alert_cooldown > 600:
-                logger.warning("ResourceCheck: WAL file %.1fMB — triggering checkpoint", wal_mb)
-                try:
-                    import urllib.request
-                    url = f"http://{host}:{port}/api/admin/wal_checkpoint"
-                    req = urllib.request.Request(url, method="POST")
-                    with urllib.request.urlopen(req, timeout=10.0) as resp:
-                        json.loads(resp.read().decode())
-                    _wal_alert_cooldown = now
-                except Exception as e:
-                    logger.error("ResourceCheck: WAL checkpoint failed: %s", e)
-                    _wal_alert_cooldown = now
+        usage = shutil.disk_usage("/app")
+        disk_pct = usage.used / usage.total
+        if disk_pct > 0.90:
+            logger.error("Disk CRITICAL: %.1f%%", disk_pct * 100)
+            if now - _disk_cleanup_cooldown > 1800:
+                subprocess.run(["docker", "system", "prune", "-f"], capture_output=True, timeout=60)
+                subprocess.run(["docker", "builder", "prune", "-f"], capture_output=True, timeout=60)
+                _disk_cleanup_cooldown = now
+        elif disk_pct > 0.85:
+            logger.warning("Disk high: %.1f%%", disk_pct * 100)
     except Exception:
         pass
-
-    # Disk space
-    disk_ok, disk_pct = check_disk_space()
-    if not disk_ok:
-        logger.error("ResourceCheck: Disk CRITICAL %.1f%%", disk_pct * 100)
-        if now - _disk_cleanup_cooldown > 1800:
-            logger.warning("ResourceCheck: Auto-cleanup — docker system prune")
-            try:
-                sp.run(["docker", "system", "prune", "-f"], capture_output=True, timeout=60.0)
-                sp.run(["docker", "builder", "prune", "-f"], capture_output=True, timeout=60.0)
-                _disk_cleanup_cooldown = now
-            except Exception as e:
-                logger.error("ResourceCheck: Auto-cleanup failed: %s", e)
-                _disk_cleanup_cooldown = now
-    elif disk_pct > 0.85:
-        logger.warning("ResourceCheck: Disk high %.1f%%", disk_pct * 100)
-
-    # Container memory (v3.5.15: dynamic container name)
-    container_name = os.environ.get("CONTAINER_NAME", "polyclaw-cipher-v3")
+    
+    # Container memory
     try:
-        result = sp.run(
-            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container_name],
+        result = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", CONTAINER_NAME],
             capture_output=True, text=True, timeout=5.0,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -531,192 +367,164 @@ def check_resources(host: str, port: int) -> None:
             else:
                 mem_mb = 0
             if mem_mb > 800:
-                logger.error("ResourceCheck: Container memory %.0fMB — OOM imminent", mem_mb)
-                send_tg_alert("high_memory",
-                    f"🚨 Container memory critical: {mem_mb:.0f}MB / 1024MB\nOOM imminent — investigate now!",
-                    cooldown_sec=300)
+                logger.error("Memory CRITICAL: %.0fMB", mem_mb)
+                send_tg("high_memory", f"🚨 Memory: {mem_mb:.0f}MB / 1024MB — OOM imminent!", cooldown=300)
             elif mem_mb > 600:
-                logger.warning("ResourceCheck: Container memory %.0fMB — high", mem_mb)
+                logger.warning("Memory high: %.0fMB", mem_mb)
     except Exception:
         pass
 
 
-# ── Main Daemon Loop ─────────────────────────────────────────────────────
+# ── Bot Process Management ───────────────────────────────────────────────
+
+_shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    logger.info("Received signal %s — shutting down", signal.Signals(signum).name)
+
+
+def run_bot() -> subprocess.Popen:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = "/app/src"
+    cmd = [sys.executable, "-m", "polyclaw_cipher_v3"]
+    logger.info("Starting bot: %s", " ".join(cmd))
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd="/app")
+    
+    def log_output():
+        for line in iter(proc.stdout.readline, b""):
+            sys.stdout.write(line.decode())
+            sys.stdout.flush()
+    
+    import threading
+    t = threading.Thread(target=log_output, daemon=True)
+    t.start()
+    return proc
+
+
+def kill_bot(proc: subprocess.Popen, timeout: float = 10.0) -> None:
+    logger.info("Graceful shutdown bot...")
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+# ── Main Loop ────────────────────────────────────────────────────────────
 
 def main() -> None:
     global _shutdown_requested
-
+    
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-
-    port = int(os.environ.get("HTTP_PORT", "8082"))
-    health_host = "127.0.0.1"
+    
     crash_loop_threshold = 10
     long_interval = 300
     restart_history: list[float] = []
     backoff_delays = [5, 10, 20, 40, 80, 160, 300]
-
+    uptime_threshold = 3600
+    
     Path("data").mkdir(exist_ok=True)
-    Path("data/heartbeat.json").write_text('{"heartbeat": ' + str(time.time()) + '}')
-
-    deep_check_interval = 60
-    last_deep_check = 0.0
-    stagnation_detector = StagnationDetector()
-    last_stagnation_check = 0.0
-    last_watchdog_check = 0.0
-
-    # v3.5.15: Configurable thresholds via env vars (for testing)
-    stagnation_threshold = int(os.environ.get("STAGNATION_THRESHOLD_MIN", "15"))
-    stagnation_check_interval = int(os.environ.get("STAGNATION_CHECK_INTERVAL", "120"))
-    watchdog_check_interval = int(os.environ.get("WATCHDOG_CHECK_INTERVAL", "60"))
-
-    # v3.5.14: CLOB error tracker
-    clob_error_tracker = CLOBErrorTracker(max_errors=15, window_sec=300)
-    clob_check_interval = 30  # Check every 30s
-    last_clob_check = 0.0
-
-    bot_label = os.environ.get("BOT_LABEL", f"port-{port}")
-
-    logger.info("Daemon v3.5.15 started — bot port=%d, label=%s", port, bot_label)
-    logger.info("TG alerts: %s", "ENABLED" if TG_BOT_TOKEN else "DISABLED (no token)")
-    logger.info("Stagnation threshold: %dm, check interval: %ds", stagnation_threshold, stagnation_check_interval)
-
-    send_tg_alert("daemon_start",
-        f"✅ Daemon started for {bot_label} (port {port})\nMonitoring active: CLOB WS, stagnation, signals, resources",
-        cooldown_sec=0)
-
+    
+    trigger = TriggerTracker()
+    
+    logger.info("Daemon v3.5.17 started — port=%d, label=%s", PORT, BOT_LABEL)
+    logger.info("Triggers: %dm no-trades / %dm no-bankroll → pipeline trace", TRIGGER_MINUTES, TRIGGER_MINUTES)
+    logger.info("TG alerts: %s", "ENABLED" if TG_BOT_TOKEN else "DISABLED")
+    
+    send_tg("daemon_start",
+        f"✅ Daemon v3.5.17 started\n{BOT_LABEL} (port {PORT})\nTrigger: {TRIGGER_MINUTES}m → pipeline trace",
+        cooldown=0)
+    
     while not _shutdown_requested:
         proc = run_bot()
         start_time = time.time()
-        uptime_threshold = 3600
         consecutive_restart_idx = 0
-        last_deep_check = time.time()
-        last_stagnation_check = time.time()
-        last_watchdog_check = time.time()
-        last_clob_check = time.time()
-
-        # v3.5.14: Alert on bot start
-        send_tg_alert("bot_start",
-            f"🔄 Bot started: {bot_label} (port {port})",
-            cooldown_sec=60)
-
+        last_critical = time.time()
+        last_trigger_check = time.time()
+        last_resource = time.time()
+        
+        # Reset trigger tracker on new bot start
+        trigger = TriggerTracker()
+        
+        send_tg("bot_start", f"🔄 Bot started: {BOT_LABEL} (port {PORT})", cooldown=60)
+        
         while proc.poll() is None and not _shutdown_requested:
-            time.sleep(10)
+            time.sleep(CRITICAL_CHECK_SEC)
             now = time.time()
-
-            # Skip health check during 30s startup grace
-            if now - start_time < 30:
+            
+            # Skip during startup grace
+            if now - start_time < STARTUP_GRACE_SEC:
                 continue
-
-            # Basic HTTP health check (every 10s)
-            if not health_check_ok(health_host, port):
-                logger.warning("Basic health check failed — restarting bot")
-                send_tg_alert("health_fail",
-                    f"⚠️ Health check failed: {bot_label} (port {port})\nHTTP server not responding — restarting bot",
-                    cooldown_sec=120)
-                kill_bot_gracefully(proc)
+            
+            # ── CRITICAL (every 10s) ──
+            ok, reason = critical_check()
+            if not ok:
+                logger.error("CRITICAL: %s — restarting bot", reason)
+                send_tg("critical", f"🔴 Critical: {reason}\n{BOT_LABEL} (port {PORT})\nAuto-restart.", cooldown=120)
+                kill_bot(proc)
                 break
-
-            # v3.5.14: CLOB WS error tracking (every 30s)
-            if now - last_clob_check >= clob_check_interval:
-                last_clob_check = now
-                should_restart, reason = clob_error_tracker.check(health_host, port)
-                if should_restart:
-                    logger.error("CLOB WS error threshold exceeded: %s — restarting bot", reason)
-                    send_tg_alert("clob_ws_errors",
-                        f"🔴 CLOB WebSocket critical: {reason}\nBot: {bot_label} (port {port})\nAuto-restarting to recover.",
-                        cooldown_sec=300)
-                    kill_bot_gracefully(proc)
-                    break
-
-            # Deep health check (every 60s)
-            if now - last_deep_check >= deep_check_interval:
-                last_deep_check = now
-                healthy, reason = deep_health_check(health_host, port)
-                if not healthy:
-                    logger.warning("Deep health check failed: %s — restarting bot", reason)
-                    send_tg_alert("deep_health_fail",
-                        f"🔴 Deep health check failed: {reason}\nBot: {bot_label} (port {port})\nAuto-restarting to recover.",
-                        cooldown_sec=300)
-                    kill_bot_gracefully(proc)
-                    break
-
-                disk_ok, disk_pct = check_disk_space()
-                if not disk_ok:
-                    logger.error("Disk space CRITICAL: %.1f%%", disk_pct * 100)
-                    send_tg_alert("disk_full",
-                        f"🚨 Disk space CRITICAL: {disk_pct*100:.1f}% full\nBot: {bot_label}",
-                        cooldown_sec=600)
-
-            # Stagnation detection (every 2 min)
-            if now - last_stagnation_check >= stagnation_check_interval:
-                last_stagnation_check = now
-                try:
-                    import urllib.request
-                    url = f"http://{health_host}:{port}/api/stats"
-                    req = urllib.request.Request(url)
-                    with urllib.request.urlopen(req, timeout=5.0) as resp:
-                        stats = json.loads(resp.read().decode())
-                    stagnation_detector.record(stats)
-                    should_restart, reason = stagnation_detector.should_restart(stats, threshold_min=stagnation_threshold)
-                    if should_restart:
-                        logger.error("STAGNATION DETECTED: %s — restarting bot", reason)
-                        send_tg_alert("stagnation",
-                            f"🟡 Stagnation detected: {reason}\nBot: {bot_label} (port {port})\nAuto-restarting to recover.",
-                            cooldown_sec=600)
-                        kill_bot_gracefully(proc)
-                        break
+            
+            # ── TRIGGER CHECK (every 60s) ──
+            if now - last_trigger_check >= TRIGGER_POLL_SEC:
+                last_trigger_check = now
+                stats = _get("/api/stats")
+                if stats:
+                    should_trace, trace_reason = trigger.update(stats)
+                    if should_trace:
+                        logger.info("Pipeline trace triggered: %s", trace_reason)
+                        trigger.run_trace(stats)
                     else:
-                        logger.info("Stagnation check: %s", reason)
-                except Exception as e:
-                    logger.debug("Stagnation check failed: %s", e)
-
-            # Watchdog checks (every 60s)
-            if now - last_watchdog_check >= watchdog_check_interval:
-                last_watchdog_check = now
-                check_signal_starvation(health_host, port)
-                check_cash_deployment(health_host, port)
-                check_resources(health_host, port)
-
+                        logger.debug("Triggers OK — trades %dm ago, bankroll %dm ago",
+                                     int((now - trigger.last_trade_time) // 60),
+                                     int((now - trigger.last_bankroll_time) // 60))
+            
+            # ── RESOURCES (every 5 min) ──
+            if now - last_resource >= 300:
+                last_resource = now
+                check_resources()
+        
         if _shutdown_requested:
-            logger.info("Graceful shutdown requested — exiting bot")
-            kill_bot_gracefully(proc)
+            kill_bot(proc)
             break
-
+        
+        # ── Crash recovery ──
         exit_code = proc.returncode
         uptime = time.time() - start_time
-
+        
         if uptime > uptime_threshold:
             consecutive_restart_idx = 0
-            logger.info("Bot had stable uptime=%.0fs, resetting backoff", uptime)
+            logger.info("Stable uptime=%.0fs, resetting backoff", uptime)
         else:
             consecutive_restart_idx = min(consecutive_restart_idx + 1, len(backoff_delays) - 1)
-
+        
         now = time.time()
         restart_history = [t for t in restart_history if now - t < 3600]
         restart_history.append(now)
         restarts_this_hour = len(restart_history)
-
+        
         if restarts_this_hour > crash_loop_threshold:
-            logger.error("CRASH LOOP: %d restarts/hour — switching to %ds intervals", restarts_this_hour, long_interval)
-            send_tg_alert("crash_loop",
-                f"🚨 CRASH LOOP: {restarts_this_hour} restarts in 1h\nBot: {bot_label} (port {port})\nSwitching to 5-min intervals (not giving up).",
-                cooldown_sec=900)
+            logger.error("CRASH LOOP: %d restarts/hour — 5min intervals", restarts_this_hour)
+            send_tg("crash_loop",
+                f"🚨 Crash loop: {restarts_this_hour} restarts/hour\n{BOT_LABEL} (port {PORT})\n5-min intervals.",
+                cooldown=900)
             delay = long_interval
         else:
             delay = backoff_delays[consecutive_restart_idx]
-
+        
         logger.warning("Bot crashed (exit=%d, uptime=%.0fs) — restart in %ds", exit_code, uptime, delay)
-        send_tg_alert("bot_crash",
-            f"💥 Bot crashed: exit={exit_code}, uptime={uptime:.0f}s\nBot: {bot_label} (port {port})\nRestarting in {delay}s.",
-            cooldown_sec=120)
-
+        send_tg("bot_crash",
+            f"💥 Bot crashed: exit={exit_code}, uptime={uptime:.0f}s\n{BOT_LABEL} (port {PORT})\nRestart in {delay}s.",
+            cooldown=120)
+        
         time.sleep(delay)
-
-    send_tg_alert("daemon_stop",
-        f"🛑 Daemon stopped: {bot_label} (port {port})",
-        cooldown_sec=0)
-    logger.info("Daemon stopped gracefully")
+    
+    send_tg("daemon_stop", f"🛑 Daemon stopped: {BOT_LABEL} (port {PORT})", cooldown=0)
+    logger.info("Daemon stopped")
 
 
 if __name__ == "__main__":
