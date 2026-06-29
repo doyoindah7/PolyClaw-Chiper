@@ -20,6 +20,7 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import datetime, timezone
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -550,69 +551,97 @@ class PolyClawCipherV3:
     # v3.5.13: Live-realism callback methods
 
     def _auto_tune_from_history(self) -> None:
-        """v3.5.13: Auto-tune config from past trade archives.
+        """v3.5.16: Auto-tune from master_history.db with decay weighting.
 
-        Runs at startup. Reads latest archived DB, analyzes performance,
-        applies recommendations to momentum config IN-MEMORY (not to file).
-        Bot learns from every past cycle automatically.
-
-        Safeguards:
-        - Requires 20+ trades to tune (skips first run)
-        - TP capped 5-15%, SL capped 3-8% (prevents outlier inflation)
-        - Uses median (not mean) for TP/SL — robust against World Cup-style anomalies
-        - Entry price uses top-3 profitable buckets (not just top-1) for wider band
-        - All wrapped in try/except — failure is non-fatal, bot starts with default config
+        Priority: master_history.db (merged archives) > trade_archive/*.db (single)
+        Decay weighting: trades within 7 days get 1.0x, 14d 0.7x, 30d 0.4x, older 0.2x.
+        Filter by instance label to avoid cross-contamination.
         """
         try:
-            archive_dir = Path("data/trade_archive")
-            if not archive_dir.exists():
-                logger.info("Auto-tune: no archive directory — first run, skipping")
-                return
-
-            # Find latest archived DB
-            archives = sorted(archive_dir.glob("cipher_v3_*.db"), reverse=True)
-            if not archives:
-                logger.info("Auto-tune: no archives found — first run, skipping")
-                return
-
-            db_path = str(archives[0])
-            db = sqlite3.connect(db_path)
-            db.row_factory = sqlite3.Row
-
-            # Load trades
-            try:
-                rows = db.execute("SELECT * FROM trades ORDER BY closed_at").fetchall()
-            except Exception:
-                logger.info("Auto-tune: no trades table in archive — skipping")
+            import time as _time
+            now = _time.time()
+            DAY = 86400
+            instance_label = os.environ.get("TG_INSTANCE_LABEL", os.environ.get("BOT_MODE", "Cipher"))
+            
+            master_path = Path("data/master_history.db")
+            
+            # Try master DB first, fall back to single archive
+            if master_path.exists():
+                db = sqlite3.connect(str(master_path))
+                db.row_factory = sqlite3.Row
+                # Filter by this instance
+                rows = db.execute(
+                    "SELECT * FROM trades WHERE instance = ? ORDER BY closed_at",
+                    (instance_label,)
+                ).fetchall()
                 db.close()
-                return
-            db.close()
+                if len(rows) < 20:
+                    logger.info("Auto-tune: only %d trades in master DB for %s — need 20+",
+                               len(rows), instance_label)
+                else:
+                    logger.info("Auto-tune: master DB has %d trades for %s", len(rows), instance_label)
+            else:
+                # Legacy: single archive
+                archive_dir = Path("data/trade_archive")
+                if not archive_dir.exists():
+                    logger.info("Auto-tune: no archive or master DB — first run, skipping")
+                    return
+                archives = sorted(archive_dir.glob("cipher_v3_*.db"), reverse=True)
+                if not archives:
+                    logger.info("Auto-tune: no archives found — first run, skipping")
+                    return
+                db = sqlite3.connect(str(archives[0]))
+                db.row_factory = sqlite3.Row
+                try:
+                    rows = db.execute("SELECT * FROM trades ORDER BY closed_at").fetchall()
+                except Exception:
+                    logger.info("Auto-tune: no trades table in archive — skipping")
+                    db.close()
+                    return
+                db.close()
 
             if len(rows) < 20:
-                logger.info("Auto-tune: only %d trades in archive — need 20+ for tuning", len(rows))
+                logger.info("Auto-tune: only %d trades — need 20+ for tuning", len(rows))
                 return
 
-            trades = [dict(r) for r in rows]
-            total = len(trades)
-            wins = [t for t in trades if t["pnl_dollar"] > 0]
-            losses = [t for t in trades if t["pnl_dollar"] <= 0]
-            wr = len(wins) / total * 100 if total > 0 else 0
-            total_pnl = sum(t["pnl_dollar"] for t in trades)
+            # v3.5.16: Decay weighting
+            trades_raw = [dict(r) for r in rows]
+            total = len(trades_raw)
+            
+            # Compute weights
+            weights = []
+            for t in trades_raw:
+                age_days = (now - t.get("closed_at", now)) / DAY
+                if age_days < 7:
+                    weights.append(1.0)
+                elif age_days < 14:
+                    weights.append(0.7)
+                elif age_days < 30:
+                    weights.append(0.4)
+                else:
+                    weights.append(0.2)
+            
+            total_weight = sum(weights)
+            
+            # Weighted stats
+            weighted_wins = sum(w for tr, w in zip(trades_raw, weights) if tr["pnl_dollar"] > 0)
+            wr = weighted_wins / total_weight * 100 if total_weight > 0 else 0
+            weighted_pnl = sum(tr["pnl_dollar"] * w for tr, w in zip(trades_raw, weights))
+            
+            logger.info("Auto-tune: analyzing %d trades (weighted %.0f, WR=%.1f%%, wPnL=$%.2f)",
+                        total, total_weight, wr, weighted_pnl)
 
-            logger.info("Auto-tune: analyzing %d trades from %s (WR=%.1f%%, PnL=$%.2f)",
-                        total, archives[0].name, wr, total_pnl)
-
-            # --- 1. Entry price analysis (top-3 profitable buckets → wider band) ---
-            price_buckets = defaultdict(lambda: {"trades": 0, "pnl": 0.0, "wins": 0})
-            for t in trades:
-                bucket = round(t["entry_price"] * 10) / 10
+            # --- 1. Weighted entry price analysis ---
+            price_buckets = defaultdict(lambda: {"trades": 0, "pnl": 0.0, "wins": 0, "weight": 0.0})
+            for tr, w in zip(trades_raw, weights):
+                bucket = round(tr["entry_price"] * 10) / 10
                 b = f"{bucket:.1f}-{bucket+0.1:.1f}"
                 price_buckets[b]["trades"] += 1
-                price_buckets[b]["pnl"] += t["pnl_dollar"]
-                if t["pnl_dollar"] > 0:
+                price_buckets[b]["pnl"] += tr["pnl_dollar"] * w
+                price_buckets[b]["weight"] += w
+                if tr["pnl_dollar"] > 0:
                     price_buckets[b]["wins"] += 1
 
-            # Sort by PnL, take top-3 buckets with 5+ trades for wider band
             sorted_prices = sorted(
                 [(b, v) for b, v in price_buckets.items() if v["trades"] >= 5],
                 key=lambda x: -x[1]["pnl"]
@@ -633,10 +662,10 @@ class PolyClawCipherV3:
                 best_price_hi = None
                 best_price_label = "N/A"
 
-            # --- 2. Hold time analysis ---
+            # --- 2. Weighted hold time analysis ---
             hold_buckets = defaultdict(lambda: {"trades": 0, "pnl": 0.0})
-            for t in trades:
-                hold_sec = t["closed_at"] - t["opened_at"]
+            for tr, w in zip(trades_raw, weights):
+                hold_sec = tr["closed_at"] - tr["opened_at"]
                 if hold_sec < 60:
                     b = "0-1min"
                 elif hold_sec < 180:
@@ -648,42 +677,38 @@ class PolyClawCipherV3:
                 else:
                     b = "10min+"
                 hold_buckets[b]["trades"] += 1
-                hold_buckets[b]["pnl"] += t["pnl_dollar"]
+                hold_buckets[b]["pnl"] += tr["pnl_dollar"] * w
 
             best_hold = max(hold_buckets.items(), key=lambda x: x[1]["pnl"])
             hold_map = {"0-1min": 60, "1-3min": 180, "3-5min": 300, "5-10min": 600, "10min+": 1800}
             recommended_hold = hold_map.get(best_hold[0], 300)
 
-            # --- 3. TP/SL analysis (median-based, sanity-capped) ---
+            # --- 3. Weighted TP/SL ---
             win_pcts = []
             loss_pcts = []
-            for t in trades:
-                if t["invested"] > 0:
-                    pct = t["pnl_dollar"] / t["invested"] * 100
+            for tr, w in zip(trades_raw, weights):
+                if tr["invested"] > 0:
+                    pct = tr["pnl_dollar"] / tr["invested"] * 100
                     if pct > 0:
-                        win_pcts.append(pct)
+                        win_pcts.extend([pct] * max(1, int(w * 10)))  # replicate by weight
                     elif pct < 0:
-                        loss_pcts.append(abs(pct))
+                        loss_pcts.extend([abs(pct)] * max(1, int(w * 10)))
 
-            # Use median (robust against outliers like World Cup 175%+)
             win_pcts.sort()
             loss_pcts.sort()
             median_win_pct = win_pcts[len(win_pcts) // 2] if win_pcts else 8.0
             median_loss_pct = loss_pcts[len(loss_pcts) // 2] if loss_pcts else 4.0
 
-            # TP = 90% of median win, capped 5-15%
             recommended_tp = max(5.0, min(15.0, round(median_win_pct * 0.9, 1)))
-            # SL = 120% of median loss, capped 3-8%
             recommended_sl = max(3.0, min(8.0, round(median_loss_pct * 1.2, 1)))
 
-            logger.info("Auto-tune: median win=%.1f%%, median loss=%.1f%% → TP=%.1f%%, SL=%.1f%%",
+            logger.info("Auto-tune: w-median win=%.1f%%, loss=%.1f%% → TP=%.1f%%, SL=%.1f%%",
                         median_win_pct, median_loss_pct, recommended_tp, recommended_sl)
 
             # --- Apply to momentum config in-memory ---
             s_conf = self.config.get("strategies", {}).get("momentum", {})
             changes = []
 
-            # Entry price: only adjust if difference > 0.05
             cur_min = s_conf.get("min_entry_price", 0.10)
             cur_max = s_conf.get("max_entry_price", 0.95)
             if best_price_lo is not None and abs(best_price_lo - cur_min) > 0.05:
@@ -693,13 +718,11 @@ class PolyClawCipherV3:
                 s_conf["max_entry_price"] = best_price_hi
                 changes.append(f"max_entry_price: {cur_max} → {best_price_hi}")
 
-            # Hold time: only adjust if difference > 60s
             cur_hold = s_conf.get("max_hold_sec", 300)
             if abs(recommended_hold - cur_hold) > 60:
                 s_conf["max_hold_sec"] = recommended_hold
                 changes.append(f"max_hold_sec: {cur_hold} → {recommended_hold}")
 
-            # TP/SL: only adjust if meaningful difference
             cur_tp = s_conf.get("take_profit_pct", 8.0)
             cur_sl = s_conf.get("stop_loss_pct", 4.0)
             if abs(recommended_tp - cur_tp) > 1.0:
@@ -709,7 +732,6 @@ class PolyClawCipherV3:
                 s_conf["stop_loss_pct"] = recommended_sl
                 changes.append(f"stop_loss_pct: {cur_sl} → {recommended_sl}")
 
-            # Update strategy objects with new config
             for strat in self.strategies:
                 if strat.name == "momentum":
                     if hasattr(strat, "take_profit_pct"):
@@ -724,18 +746,40 @@ class PolyClawCipherV3:
                         strat.max_entry_price = s_conf.get("max_entry_price", strat.max_entry_price)
 
             if changes:
-                logger.info("Auto-tune: applied %d changes from %d past trades:", len(changes), total)
+                logger.info("Auto-tune: applied %d changes from %d trades (weighted %.0f):",
+                           len(changes), total, total_weight)
                 for c in changes:
                     logger.info("  ⚙️ %s", c)
             else:
                 logger.info("Auto-tune: current config is optimal (no changes needed)")
 
-            # Store analysis summary for stats API
+            # v3.5.16: Log to master DB auto_tune_log
+            try:
+                if master_path.exists():
+                    mdb = sqlite3.connect(str(master_path))
+                    mdb.execute("""
+                        INSERT INTO auto_tune_log
+                        (applied_at, instance, trades_analyzed, win_rate, total_pnl,
+                         tp_pct, sl_pct, min_entry, max_entry, hold_sec, changes)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """, (
+                        datetime.now(timezone.utc).isoformat(), instance_label, total,
+                        round(wr, 1), round(weighted_pnl, 2),
+                        recommended_tp, recommended_sl,
+                        best_price_lo or 0.1, best_price_hi or 0.95,
+                        recommended_hold, json.dumps(changes)
+                    ))
+                    mdb.commit()
+                    mdb.close()
+            except Exception:
+                pass
+
             self._auto_tune_summary = {
-                "source_archive": archives[0].name,
+                "source": "master_history.db" if master_path.exists() else "archive",
                 "trades_analyzed": total,
+                "weighted_count": round(total_weight, 0),
                 "win_rate": round(wr, 1),
-                "total_pnl": round(total_pnl, 2),
+                "total_pnl": round(weighted_pnl, 2),
                 "changes_applied": changes,
                 "best_entry_bucket": best_price_label,
                 "best_hold_bucket": best_hold[0],
