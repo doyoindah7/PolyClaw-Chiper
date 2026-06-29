@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PolyClaw-Cipher TG Bot — multi-VPS monitor.
+"""PolyClaw-Cipher TG Bot — Ireland monitor v3.5.16.
 
 Usage: python3 scripts/tg_bot.py
 Env: TG_BOT_TOKEN, TG_CHAT_ID, BOT_API_BASES (JSON list)
@@ -9,14 +9,10 @@ import json, os, sys, time, urllib.request
 TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
-# Support multiple API bases: JSON list of {label, host, instances}
-# Default: Lightsail + EC2
+# v3.5.16: Ireland-only (EC2 decommissioned)
 DEFAULT_BASES = json.dumps([
-    {"label": "🇮🇪 Lightsail", "host": "http://18.200.234.149", "instances": [
-        (8082, "#0 $25"), (8084, "#1 $15")
-    ]},
-    {"label": "🇦🇺 EC2", "host": "http://3.107.53.103", "instances": [
-        (8082, "#0 $25"), (8084, "#1 $15")
+    {"label": "🇮🇪 Ireland", "host": "http://18.200.234.149", "instances": [
+        (8082, "Cipher $25"), (8084, "Fifteen $15"), (8086, "Scalper")
     ]},
 ])
 BASES_RAW = os.environ.get("BOT_API_BASES", DEFAULT_BASES)
@@ -70,7 +66,7 @@ def fmt_uptime(sec):
 
 def cmd_start():
     send(
-        "🔍 <b>PolyClaw-Cipher</b>\n\n"
+        "🔍 <b>PolyClaw-Cipher v3.5.16</b>\n\n"
         "/status — All instances overview\n"
         "/positions — Open positions\n"
         "/trades — Last 20 trades\n"
