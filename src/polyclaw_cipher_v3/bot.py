@@ -1,4 +1,4 @@
-"""PolyClaw-Cipher v3 orchestrator — event-driven HFT bot.
+"""PolyClaw-Cipher v3 orchestrator - event-driven HFT bot.
 
 Wires together:
 - EventBus (in-process pub/sub)
@@ -10,7 +10,7 @@ Wires together:
 - PaperExecutor (async, non-blocking)
 - State (SQLite WAL, async)
 - HTTPServer (FastAPI, unified dashboard v2+v3)
-- Alerter (stub — Telegram deferred)
+- Alerter (stub - Telegram deferred)
 """
 from __future__ import annotations
 
@@ -143,10 +143,10 @@ class PolyClawCipherV3:
         # v3.5.5 FIX (P1-05): Force-close stale/dead positions to free cash
         self.max_position_age_sec = self.config.get("risk", {}).get("max_position_age_sec", 1800)  # 30 min
         self.dead_position_age_sec = self.config.get("risk", {}).get("dead_position_age_sec", 900)  # 15 min
-        # v3.5.13: Position state sync — track PENDING positions (not yet on-chain confirmed)
+        # v3.5.13: Position state sync - track PENDING positions (not yet on-chain confirmed)
         # Position lifecycle: PENDING (submitted, awaiting block confirmation)
         #                     → CONFIRMED (on-chain, can exit)
-        # Bot cannot exit PENDING positions — prevents "exit fails, position stuck" bug
+        # Bot cannot exit PENDING positions - prevents "exit fails, position stuck" bug
         self._pending_positions: set[str] = set()  # position IDs in PENDING state
         self._total_gas_fees_paid: float = 0.0  # track cumulative gas for stats
         self._stats_task: asyncio.Task | None = None
@@ -178,8 +178,12 @@ class PolyClawCipherV3:
         except Exception as e:
             logger.error("Failed to restore strategy states from DB: %s", e)
 
-        # v3.5.13: Auto-tune from history — analyze latest archive, apply in-memory
-        self._auto_tune_from_history()
+        # v3.5.13: Auto-tune from history - analyze latest archive, apply in-memory
+        # v3.5.16: Can be disabled via SKIP_AUTO_TUNE=1 env var (while auto-tune v2 is built)
+        if os.environ.get("SKIP_AUTO_TUNE", "0") != "1":
+            self._auto_tune_from_history()
+        else:
+            logger.info("Auto-tune: SKIP_AUTO_TUNE=1 — using config values as-is")
 
         # Start services
         await self.binance_feed.start()
@@ -260,7 +264,7 @@ class PolyClawCipherV3:
             await self.clob_feed.sync_connections()
 
         # v3.4.0 FIX (BUG-C7): Cache open positions once per loop iteration
-        # Instead of querying DB per-market (was O(N²) — 50 markets × SELECT *)
+        # Instead of querying DB per-market (was O(N2) - 50 markets × SELECT *)
         self._cached_open_positions = await self.position_repo.get_open_positions()
 
         # Check open positions for resolution / TP/SL
@@ -272,7 +276,7 @@ class PolyClawCipherV3:
         # Run strategies on ALL markets (every loop cycle = 1s)
         self._signals_this_cycle = 0
         strat_signal_counts = {s.name: 0 for s in self.strategies}
-        
+
         markets_tried = 0
         for market in self._markets:
             if not self._running:
@@ -283,7 +287,7 @@ class PolyClawCipherV3:
             await self._try_strategies(market)
             for strat in self.strategies:
                 strat_signal_counts[strat.name] += (self._signals_this_cycle - before)
-        
+
         # v3.5.1: Log strategy evaluation summary (every ~30s to avoid spam)
         if self._signals_this_cycle > 0 or (time.time() - (self._last_summary_log or 0)) > 30:
             self._last_summary_log = time.time()
@@ -398,7 +402,7 @@ class PolyClawCipherV3:
                 return
 
             # v3.5.13: Mark position as PENDING (will be confirmed after on-chain delay)
-            # Position cannot be exited until confirmed — prevents "exit fails, position stuck" bug
+            # Position cannot be exited until confirmed - prevents "exit fails, position stuck" bug
             self._pending_positions.add(pos.id)
 
             # v3.4.0 FIX (BUG-C2): Handle InsufficientFundsError from wallet.debit()
@@ -463,7 +467,7 @@ class PolyClawCipherV3:
         v3.4.3 FIX: When market is not in active scan (market_map returns None),
         fetch it from Gamma API to check if it's resolved. Previously, resolved
         markets dropped out of scan (scanner queries active=true only) and positions
-        stayed open FOREVER — locking cash indefinitely.
+        stayed open FOREVER - locking cash indefinitely.
         """
         # v3.4.0 FIX (BUG-C7): Use cached positions
         positions = self._cached_open_positions
@@ -473,7 +477,7 @@ class PolyClawCipherV3:
         market_map = {m.condition_id: m for m in self._markets}
 
         for pos in positions[:]:
-            # v3.5.13: Skip PENDING positions — cannot exit until on-chain confirmed
+            # v3.5.13: Skip PENDING positions - cannot exit until on-chain confirmed
             # This prevents "exit fails, position stuck" bug in live trading
             # v3.5.13 FIX: Auto-confirm if pending > 10s (safety net for failed asyncio tasks)
             if self._is_position_pending(pos.id):
@@ -498,7 +502,7 @@ class PolyClawCipherV3:
                 except Exception as e:
                     logger.debug("Failed to fetch market %s: %s", pos.market_condition_id[:8], e)
 
-            # Resolution check — real, not fake
+            # Resolution check - real, not fake
             if market and market.is_closed:
                 winner = get_winning_side(market)
                 if winner is not None:
@@ -523,7 +527,7 @@ class PolyClawCipherV3:
             #   - 30 min (max_position_age_sec): close ALL stale positions (default)
             #   - 15 min + 0% PnL (dead_position_age_sec): close "dead" positions sooner
             #     These are positions in nearly-resolved markets where price hasn't moved
-            #     at all — they just trap cash without any profit potential.
+            #     at all - they just trap cash without any profit potential.
             pos_age_sec = time.time() - pos.opened_at
             max_age = getattr(self, 'max_position_age_sec', 1800)
             dead_age = getattr(self, 'dead_position_age_sec', 900)  # 15 min
@@ -540,7 +544,7 @@ class PolyClawCipherV3:
                 continue  # Skip further processing since position was closed
 
             if pos_age_sec > dead_age:
-                # v3.5.5: Dead position check — if PnL is exactly 0%, market is "dead"
+                # v3.5.5: Dead position check - if PnL is exactly 0%, market is "dead"
                 # (entry_price == current_price means no movement, likely nearly-resolved)
                 current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
                 if current > 0 and abs(current - pos.entry_price) < 0.001:
@@ -565,9 +569,9 @@ class PolyClawCipherV3:
             now = _time.time()
             DAY = 86400
             instance_label = os.environ.get("TG_INSTANCE_LABEL", os.environ.get("BOT_MODE", "Cipher"))
-            
+
             master_path = Path("data/master_history.db")
-            
+
             # Try master DB first, fall back to single archive
             if master_path.exists():
                 db = sqlite3.connect(str(master_path))
@@ -579,7 +583,7 @@ class PolyClawCipherV3:
                 ).fetchall()
                 db.close()
                 if len(rows) < 20:
-                    logger.info("Auto-tune: only %d trades in master DB for %s — using ALL instances",
+                    logger.info("Auto-tune: only %d trades in master DB for %s - using ALL instances",
                                len(rows), instance_label)
                     db = sqlite3.connect(str(master_path))
                     db.row_factory = sqlite3.Row
@@ -591,30 +595,30 @@ class PolyClawCipherV3:
                 # Legacy: single archive
                 archive_dir = Path("data/trade_archive")
                 if not archive_dir.exists():
-                    logger.info("Auto-tune: no archive or master DB — first run, skipping")
+                    logger.info("Auto-tune: no archive or master DB - first run, skipping")
                     return
                 archives = sorted(archive_dir.glob("cipher_v3_*.db"), reverse=True)
                 if not archives:
-                    logger.info("Auto-tune: no archives found — first run, skipping")
+                    logger.info("Auto-tune: no archives found - first run, skipping")
                     return
                 db = sqlite3.connect(str(archives[0]))
                 db.row_factory = sqlite3.Row
                 try:
                     rows = db.execute("SELECT * FROM trades ORDER BY closed_at").fetchall()
                 except Exception:
-                    logger.info("Auto-tune: no trades table in archive — skipping")
+                    logger.info("Auto-tune: no trades table in archive - skipping")
                     db.close()
                     return
                 db.close()
 
             if len(rows) < 20:
-                logger.info("Auto-tune: only %d trades — need 20+ for tuning", len(rows))
+                logger.info("Auto-tune: only %d trades - need 20+ for tuning", len(rows))
                 return
 
             # v3.5.16: Decay weighting
             trades_raw = [dict(r) for r in rows]
             total = len(trades_raw)
-            
+
             # Compute weights
             weights = []
             for t in trades_raw:
@@ -627,14 +631,14 @@ class PolyClawCipherV3:
                     weights.append(0.4)
                 else:
                     weights.append(0.2)
-            
+
             total_weight = sum(weights)
-            
+
             # Weighted stats
             weighted_wins = sum(w for tr, w in zip(trades_raw, weights) if tr["pnl_dollar"] > 0)
             wr = weighted_wins / total_weight * 100 if total_weight > 0 else 0
             weighted_pnl = sum(tr["pnl_dollar"] * w for tr, w in zip(trades_raw, weights))
-            
+
             logger.info("Auto-tune: analyzing %d trades (weighted %.0f, WR=%.1f%%, wPnL=$%.2f)",
                         total, total_weight, wr, weighted_pnl)
 
@@ -838,9 +842,9 @@ class PolyClawCipherV3:
             await self.trade_repo.add_trade(trade)
             # Credit cash (invested + pnl)
             await self.wallet.credit(pos.invested + trade.pnl_dollar)
-        # Record trade in risk manager (outside lock — no DB)
+        # Record trade in risk manager (outside lock - no DB)
         # v3.3.0: Use record_close() for pnl/win-loss (was record_trade() which
-        # also incremented rate limit counter — causing double-count bug)
+        # also incremented rate limit counter - causing double-count bug)
         self.risk.record_close(strat_name, trade.pnl_dollar)
         # Strategy hooks
         strat = self._find_strategy(strat_name)
@@ -900,17 +904,17 @@ class PolyClawCipherV3:
         so Prometheus metrics and API don't show 0 before _refresh_stats_loop runs.
         """
         snap = self.wallet.snapshot()
-        
+
         # v3.5.12: Auto-archive when micro-cap instance ($10) reaches $25 target
-        if (self.wallet.bankroll >= 25.0 and self.wallet.initial_bankroll <= 15.0 
+        if (self.wallet.bankroll >= 25.0 and self.wallet.initial_bankroll <= 15.0
             and not getattr(self, "_auto_archived_at_25", False)):
             self._auto_archived_at_25 = True
             import subprocess
-            subprocess.run(["/usr/local/bin/python", "scripts/archive_trades.py"], 
+            subprocess.run(["/usr/local/bin/python", "scripts/archive_trades.py"],
                          cwd="/app", capture_output=True)
-            logger.info("AUTO-ARCHIVE: Micro-cap BR=$%.2f (from $%.0f) reached $25 — trades saved",
+            logger.info("AUTO-ARCHIVE: Micro-cap BR=$%.2f (from $%.0f) reached $25 - trades saved",
                        self.wallet.bankroll, self.wallet.initial_bankroll)
-        
+
         snap["mode"] = self.config.get("bot", {}).get("mode", "paper")
         from collections import Counter
         cat_counts = Counter(m.classify() for m in self._markets)
@@ -1012,7 +1016,7 @@ class PolyClawCipherV3:
                 stats["arbs"] = 0
 
                 # v3.4.4 FIX (Kimi+Arena audit): Override ALL strategy stats from DB
-                # In-memory counters reset to 0 on every restart — DB is source of truth
+                # In-memory counters reset to 0 on every restart - DB is source of truth
                 db_signal_counts = await self.trade_repo.signals_count_per_strategy()
                 db_strat_stats = await self.trade_repo.per_strategy_stats()
                 db_strat_map = {s["name"]: s for s in db_strat_stats}
@@ -1093,7 +1097,7 @@ class PolyClawCipherV3:
         """v3.5.5 FIX (P1-03): Periodic WAL checkpoint every 30 minutes.
 
         Flushes WAL file to main DB to prevent unbounded WAL growth.
-        PASSIVE mode is safe — does not block concurrent readers/writers.
+        PASSIVE mode is safe - does not block concurrent readers/writers.
         """
         while self._running:
             try:

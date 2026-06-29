@@ -13,6 +13,7 @@ services:
       - ./config:/app/config:ro
     environment:
       - BOT_MODE=paper
+      - SKIP_AUTO_TUNE=1
       - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
       - TG_CHAT_ID=2051570522
       - INITIAL_BANKROLL_USD=25.00
