@@ -1,0 +1,33 @@
+services:
+  polyclaw-nova:
+    build:
+      context: .
+    container_name: polyclaw-nova
+    restart: unless-stopped
+    volumes:
+      - /home/ubuntu/polyclaw-cipher-v3/data_nova:/app/data
+      - /home/ubuntu/polyclaw-cipher-v3/config:/app/config:ro
+    environment:
+      - BOT_MODE=nova
+      - HTTP_PORT=8088
+      - INITIAL_BANKROLL_USD=25.0
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+      - TG_INSTANCE_LABEL=Nova
+      - TG_ALERT_TRADES=0
+      - EXECUTION_MODE=paper
+      - POLYGON_RPC_URL=https://polygon.llamarpc.com
+      - POLYGON_RPC_FALLBACK=https://rpc.ankr.com/polygon
+      - TG_DISABLE_POLL=true
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+networks:
+  polyclaw-nova_default:
+    driver: bridge

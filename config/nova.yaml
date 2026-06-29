@@ -1,0 +1,59 @@
+# PolyClaw-Cipher v3.5.16 — Nova Experimental Bot
+# Momentum from Fifteen + slots for experimental strategies.
+# Port 8088, data_nova/
+
+bot:
+  scan_interval_sec: 60
+  loop_interval_sec: 1
+
+tier:
+  force_tier: 0  # Auto-transition
+
+sizer:
+  min_position_usd: 3.0
+  max_pct_per_trade: 0.20
+  max_open_positions: 10
+
+risk:
+  initial_bankroll_usd: 25.0
+  max_consecutive_losses_global: 6
+  max_daily_drawdown_pct: 40.0
+  max_trades_per_hour_global: 40
+  per_strategy:
+    momentum:
+      max_consecutive_losses: 4
+      max_trades_per_hour: 20
+      max_capital_pct: 0.40
+
+strategies:
+  latency_arb:
+    enabled: false
+
+  atomic_arb:
+    enabled: false
+
+  resolution_snipe:
+    enabled: false
+
+  # === MOMENTUM (from Fifteen proven config) ===
+  momentum:
+    enabled: true
+    lookback_short_sec: 30
+    lookback_long_sec: 120
+    min_momentum_short_pct: 0.5
+    min_momentum_long_pct: 0.25
+    take_profit_pct: 8.0           # Auto-tune will adjust
+    stop_loss_pct: 7.6             # From auto-tune (median loss 6.3%)
+    max_hold_sec: 60               # From auto-tune (94% profit <1min)
+    max_position_pct: 0.15
+    max_positions: 6
+    cooldown_sec: 30
+    min_entry_price: 0.10
+    max_entry_price: 0.95
+    allowed_categories: [crypto, sports_match, sports_total, sports_spread, economics, politics, other]
+
+  # === EXPERIMENTAL SLOTS (disabled — ready for testing) ===
+  # news_llm:
+  #   enabled: false
+  #   llm_model: "glm-4.5"
+  #   ...
