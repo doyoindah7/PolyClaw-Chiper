@@ -49,7 +49,7 @@ strategies:
     min_entry_price: 0.15            # 0.30→0.15
     max_entry_price: 0.90            # 0.95→0.90
     skip_random_outcome: false
-    allowed_categories: ["crypto", "economics", "sports_total", "other"]
+    allowed_categories: ["crypto", "sports_match", "sports_total", "sports_spread", "economics", "politics", "other"]
 
 risk:
   initial_bankroll_usd: 15.00

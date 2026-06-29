@@ -34,19 +34,15 @@ strategies:
   resolution_snipe:
     enabled: false               # Disable — dead weight
   momentum:
-    enabled: false
-    max_positions: 3             # 3 concurrent max for $15
-    min_entry_price: 0.30
-    max_entry_price: 0.75
+    enabled: true
+    max_positions: 4             # 4 concurrent max for $15
+    min_entry_price: 0.10
+    max_entry_price: 0.95
     min_position_usd: 1.0        # Minimum $1 per position
     max_per_market_pct: 0.25     # Per-market exposure cap
-    take_profit_pct: 8.0         # Standard (auto-tune adjusts later)
-    stop_loss_pct: 7.6           # From auto-tune (median loss 6.3%)
-    max_hold_sec: 60             # From auto-tune (94% profit <1min)
+    take_profit_pct: 8.0
+    stop_loss_pct: 7.6
+    max_hold_sec: 60
     cooldown_sec: 45
-    allowed_categories:
-      - crypto
-      - sports_total
-      - economics
-      - other
-    # Exclude: sports_match (47% WR), sports_spread, politics, entertainment
+    # v3.5.16: all categories enabled — sports_match WR=70% from 2300 trades
+    allowed_categories: ["crypto", "sports_match", "sports_total", "sports_spread", "economics", "politics", "entertainment", "other"]
