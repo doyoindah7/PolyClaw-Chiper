@@ -100,6 +100,12 @@ class LiveExecutor:
         # ─── Exit State Tracking ────────────────────────────────────────────
         # token_id -> timestamp when exit was attempted (prevents retry loop)
         self._exiting_tokens: dict[str, float] = {}
+
+        # ─── PENDING Position Tracking (BUG FIX: live orders invisible) ─────
+        # order_id -> position_id for "live" orders (not yet matched)
+        self._live_order_to_pos: dict[str, str] = {}
+        # position IDs whose CLOB order timed out (need cleanup)
+        self._timed_out_pos_ids: set[str] = set()
         self._exit_retry_delay_sec = self.config.get("exit_retry_delay_sec", 30)
 
         # ─── Rate Limiter (prevent CLOB API 429) ──────────────────────────
@@ -314,12 +320,18 @@ class LiveExecutor:
                         ORDER_TIMEOUT_SEC,
                     )
 
+                    # Build PENDING position BEFORE timeout task starts
+                    # BUG FIX: return position so bot.py can track it in position_repo
+                    # _pending_positions in bot.py handles exit-safety (skip exits for 10s)
+                    pending_pos = self._build_position(signal, token_id, price, size, market_question)
+                    self._live_order_to_pos[order_id] = pending_pos.id
+
                     # Start timeout task — auto-cancel if not filled
                     asyncio.create_task(
                         self._order_timeout_task(order_id, ORDER_TIMEOUT_SEC),
                         name=f"order_timeout_{order_id[:8]}",
                     )
-                    return None  # Not filled yet — don't create position
+                    return pending_pos
 
                 else:
                     logger.warning("LIVE ORDER unknown status: %s — treating as failed", status)
@@ -557,6 +569,12 @@ class LiveExecutor:
         await self._cancel_order(order_id)
         order.status = "timeout"
 
+        # Mark position for cleanup (bot.py will remove from position_repo + credit wallet)
+        pos_id = self._live_order_to_pos.pop(order_id, None)
+        if pos_id:
+            self._timed_out_pos_ids.add(pos_id)
+            logger.info("Position %s marked for cleanup (order %s timed out)", pos_id[:8], order_id[:12])
+
     async def _cleanup_loop(self):
         """Background loop: periodically clean up stale orders."""
         while self._running:
@@ -688,6 +706,17 @@ class LiveExecutor:
         if price <= 0 or price >= 1:
             return 0
         return usd_amount / price
+
+    def get_timed_out_positions(self) -> set[str]:
+        """Return and clear set of position IDs whose CLOB order timed out.
+        
+        bot.py should call this each cycle and:
+        1. Remove position from position_repo
+        2. Credit wallet
+        """
+        result = self._timed_out_pos_ids.copy()
+        self._timed_out_pos_ids.clear()
+        return result
 
     def _build_position(self, signal: Signal, token_id: str, price: float,
                         size: float, market_question: str) -> Position:
