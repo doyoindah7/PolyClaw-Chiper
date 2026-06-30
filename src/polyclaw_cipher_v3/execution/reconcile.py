@@ -208,7 +208,7 @@ async def reconcile_from_clob(executor, wallet, position_repo, trade_repo, marke
                             continue  # Skip adding to DB
                         except Exception as e:
                             logger.error("CLOB reconcile: auto-close failed for rogue position: %s", e)
-                    await position_repo.open_position(pos)
+                    continue  # FIXED: skip rogue position even if close fails
                     logger.info("CLOB reconcile: created Position %s | %s | %.2f %s shares @ $%.4f (PnL: %+.2f)",
                                pos.id[:8], title[:40], size, side.value, avg_price, pnl)
                     stats["positions_created"] = stats.get("positions_created", 0) + 1
