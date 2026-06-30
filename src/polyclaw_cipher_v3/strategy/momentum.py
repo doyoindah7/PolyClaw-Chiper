@@ -37,6 +37,7 @@ class MomentumStrategy(BaseStrategy):
         self.max_notional_pct = c.get("max_notional_pct", 0.15)
         self.min_confidence = c.get("min_confidence", 0.40)
         self.max_volatility = c.get("max_volatility", 0.08)
+        self.min_position_usd = c.get("min_position_usd", 1.0)  # v3.5.17: configurable, was hardcoded 1.0
         # v3.5.12: Max % bankroll in single market
         self.max_per_market_pct = c.get("max_per_market_pct", 0.30)
         # v3.5.16: Volume spike detector config
@@ -68,8 +69,14 @@ class MomentumStrategy(BaseStrategy):
         self._dbg_evaluated = 0
         self._dbg_signal = 0
         self._dbg_vol_spike = 0  # v3.5.16: volume spike boosted signals
+        self._dbg_after_vol_check = 0  # v3.6.0: reached sizer after volatility
+        self._dbg_volatility_filtered = 0  # v3.6.0: filtered by volatility
+        self._dbg_no_clob_price = 0  # v3.6.0: CLOB mid=0, no price data
+        self._dbg_no_momentum = 0  # v3.6.0: momentum below threshold (both directions)
         # v3.5.17: Auto-tune v2 per-category params
         self._auto_tune = None  # set via set_auto_tune()
+        # v3.6.0: Force signal mode — bypass all filters for debugging
+        self.force_signal_mode = c.get("force_signal_mode", False)
 
     def set_auto_tune(self, auto_tune) -> None:
         """Set auto-tune v2 engine for per-category parameter lookup."""
@@ -82,6 +89,54 @@ class MomentumStrategy(BaseStrategy):
         if not self._clob:
             self._dbg_no_clob += 1
             return None
+
+        # v3.6.0: Force mode — bypass all filters when enabled
+        if self.force_signal_mode:
+            # Still apply basic sanity checks
+            cat = market.classify()
+            check_price = self._clob.get_price(market.yes_token_id) if self._clob else market.yes_price
+            if check_price <= 0:
+                check_price = market.yes_price
+            if check_price < self.min_entry_price or check_price > self.max_entry_price:
+                self._dbg_price_filtered += 1
+                return None
+            if market.volume_24h < 50:
+                return None
+            # Per-market cap
+            open_positions = context.get("open_positions", [])
+            my_positions = [p for p in open_positions if p.strategy == self.name]
+            if len(my_positions) >= self.max_positions:
+                self._dbg_max_pos += 1
+                return None
+            if any(p.market_condition_id == market.condition_id for p in my_positions):
+                self._dbg_one_per_mkt += 1
+                return None
+            bankroll = context.get("bankroll", 5.0)
+            total_inv = sum(p.invested for p in open_positions if getattr(p, 'market_condition_id', None) == market.condition_id)
+            if bankroll > 0 and (total_inv + self.min_position_usd) > bankroll * self.max_per_market_pct:
+                self._dbg_one_per_mkt += 1
+                return None
+            # Generate signal with CLOB mid price
+            side = Side.YES if check_price < 0.50 else Side.NO
+            token_id = market.yes_token_id if side == Side.YES else market.no_token_id
+            self._dbg_evaluated += 1
+            self._dbg_signal += 1
+            self.signals_emitted += 1
+            self._last_signal_at[market.condition_id] = time.time()
+            # Dynamic sizing: use bankroll * max_notional_pct, capped at config
+            force_size = min(bankroll * self.max_notional_pct, 5.0)
+            if force_size < self.min_position_usd:
+                force_size = self.min_position_usd
+            return Signal(
+                market_condition_id=market.condition_id,
+                token_id=token_id,
+                side=side,
+                suggested_price=check_price,
+                suggested_size_usd=round(force_size, 2),
+                confidence=0.55,
+                reason=f"FORCE: {market.question[:50]}",
+                strategy_name=self.name,
+            )
 
         # FIX: Category filter — skip random-outcome markets
         # Sports match winner, entertainment = no momentum edge
@@ -163,6 +218,7 @@ class MomentumStrategy(BaseStrategy):
         yes_price_clob = self._clob.get_price(market.yes_token_id)
         no_price_clob = self._clob.get_price(market.no_token_id)
         if yes_price_clob <= 0 and no_price_clob <= 0:
+            self._dbg_no_clob_price += 1
             return None
 
         # v3.5.16: Volume spike detection
@@ -229,6 +285,7 @@ class MomentumStrategy(BaseStrategy):
         # Volatility check
         vol = self._clob.get_volatility(token_id, 120.0)
         if vol > self.max_volatility:
+            self._dbg_vol_filtered += 1
             return None
         elif vol > 0.04:
             confidence *= 0.9
@@ -238,6 +295,7 @@ class MomentumStrategy(BaseStrategy):
         cash = context.get("cash", bankroll)
         sizer = context.get("sizer")
         strategy_cap_pct = context.get("strategy_cap_pct", self.max_notional_pct)
+        self._dbg_after_vol_check += 1  # v3.6.0: reached sizer
         if sizer:
             notional = sizer.size(
                 bankroll=bankroll,
@@ -255,7 +313,7 @@ class MomentumStrategy(BaseStrategy):
             notional = min(notional, bankroll * self.max_notional_pct)
             notional = max(2.5, min(notional, cash * 0.90))
 
-        if notional < 1.0:
+        if notional < self.min_position_usd:
             self._dbg_no_notional += 1
             return None
 
@@ -287,6 +345,7 @@ class MomentumStrategy(BaseStrategy):
             "evaluated": self._dbg_evaluated,
             "signals": self._dbg_signal,
             "no_clob": self._dbg_no_clob,
+            "no_clob_price": self._dbg_no_clob_price,
             "random_outcome": self._dbg_random_outcome,
             "cat_filtered": self._dbg_cat_filtered,
             "vol_filtered": self._dbg_vol_filtered,
@@ -298,6 +357,8 @@ class MomentumStrategy(BaseStrategy):
             "low_conf": self._dbg_low_conf,
             "no_notional": self._dbg_no_notional,
             "vol_spike_boosted": self._dbg_vol_spike,
+            "after_vol_check": self._dbg_after_vol_check,
+            "volatility_filtered": self._dbg_volatility_filtered,
         }
 
     def register_entry(self, pos_id: str, condition_id: str, entry_price: float, invested: float = 0.0) -> None:

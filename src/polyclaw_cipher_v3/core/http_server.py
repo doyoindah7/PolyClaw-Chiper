@@ -259,6 +259,11 @@ body {
   margin-right: 6px; animation: pulse 2s infinite;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+@keyframes flashGreen { 0%{background:transparent} 50%{background:rgba(0,230,118,0.25)} 100%{background:transparent} }
+@keyframes flashRed { 0%{background:transparent} 50%{background:rgba(255,82,82,0.25)} 100%{background:transparent} }
+.flash-up { animation: flashGreen 0.6s ease; }
+.flash-down { animation: flashRed 0.6s ease; }
+.update-counter { font-size: 0.55rem; color: var(--dim); margin-left: 6px; }
 .hdr .live { color: var(--green); font-size: 0.78rem; font-weight: 600; }
 .hdr .clock { color: var(--muted); font-size: 0.78rem; }
 
@@ -558,6 +563,16 @@ function updateConnectionStatus(ok) {
   }
 }
 
+// v3.6.1: Flash animation on value change
+let _prevValues = {};
+function _flashOnChange(id, newVal, prevVal) {
+  const el = document.getElementById(id);
+  if (!el || prevVal === undefined || prevVal === newVal) return;
+  el.classList.remove('flash-up', 'flash-down');
+  void el.offsetWidth; // force reflow
+  el.classList.add(newVal > prevVal ? 'flash-up' : 'flash-down');
+}
+
 function renderKPIs(d) {
   const bankroll = d.bankroll || 0;
   const cash = d.cash || 0;
@@ -567,6 +582,12 @@ function renderKPIs(d) {
   const positions = d.open_positions || [];
   const trades = d.trades || 0;
   const winRate = d.win_rate || 0;
+
+  _flashOnChange('kpi-bankroll', bankroll.toFixed(4), (_prevValues.bankroll||''));
+  _flashOnChange('kpi-cash', cash.toFixed(4), (_prevValues.cash||''));
+  _flashOnChange('kpi-invested', invested.toFixed(4), (_prevValues.invested||''));
+  _flashOnChange('kpi-positions', positions.length.toString(), (_prevValues.positions||''));
+  _prevValues = { bankroll: bankroll.toFixed(4), cash: cash.toFixed(4), invested: invested.toFixed(4), positions: positions.length.toString() };
 
   document.getElementById('kpi-bankroll').textContent = fmtUsd(bankroll);
   document.getElementById('kpi-bankroll-delta').textContent = pnlSign(pnl) + fmtUsd(pnl) + ' vs $' + INITIAL_BANKROLL.toFixed(2);
@@ -1035,7 +1056,8 @@ async function refresh() {
       renderRisk(d);
       renderSystem(d);
       refreshSuccessCount++;
-      document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+      document.getElementById('last-update').innerHTML = new Date().toLocaleTimeString() + ' <span id="update-secs-ago" class="update-counter">(0s ago)</span>';
+      _lastUpdateTs = Date.now();
       updateConnectionStatus(true);
       // Auto-refresh Trade History page 1 (silent — no loading spinner)
       // Only refresh if panel is open AND user is on page 1 with 'all' filter
@@ -1059,8 +1081,12 @@ async function refresh() {
 refresh();
 fetchHistoryTotal();
 setInterval(refresh, REFRESH_MS);
+let _lastUpdateTs = Date.now();
 setInterval(() => {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  const ago = Math.round((Date.now() - (_lastUpdateTs || Date.now())) / 1000);
+  const el = document.getElementById('update-secs-ago');
+  if (el) el.textContent = '(' + ago + 's ago)';
 }, 1000);
 </script>
 </body>

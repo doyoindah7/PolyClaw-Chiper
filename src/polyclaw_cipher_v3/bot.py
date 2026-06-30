@@ -34,6 +34,7 @@ from .core.resolution import get_winning_side, is_truly_resolved
 from .core.scanner import MarketScanner
 from .core.types import Market, Position, Side, Signal
 from .execution.paper import PaperExecutor
+from .execution.live import LiveExecutor
 from .observability.logs import setup_logging
 from .risk.manager import RiskManager
 from .risk.sizer import CompoundingSizer
@@ -80,13 +81,16 @@ class PolyClawCipherV3:
         self._tier_manager = TierManager(force_tier=self.config.get("tier", {}).get("force_tier", 0), cooldown_hours=self.config.get("tier", {}).get("cooldown_hours", 24), yaml_config=self.config.get("tier", {}))
         self.sizer = CompoundingSizer(self.config.get("risk", {}).get("sizer", {}), tier_manager=self._tier_manager)
 
-        # Executor
-        self.executor = PaperExecutor(self.config.get("execution", {}).get("paper", {}))
-        # v3.5.13: Wire callbacks for live-realism simulation
-        # - gas_fee_callback: deduct gas from wallet
-        # - on_position_confirmed: mark position as confirmed after on-chain delay
-        self.executor.gas_fee_callback = self._deduct_gas_fee
-        self.executor.on_position_confirmed = self._confirm_position
+        # Executor — pick paper or live based on BOT_MODE
+        bot_mode = os.environ.get("BOT_MODE", "paper")
+        if bot_mode == "live":
+            logger.warning("🚨 LIVE TRADING MODE — real money at risk!")
+            self.executor = LiveExecutor(self.config.get("execution", {}).get("live", {}))
+        else:
+            self.executor = PaperExecutor(self.config.get("execution", {}).get("paper", {}))
+            # v3.5.13: Wire callbacks for live-realism simulation (paper only)
+            self.executor.gas_fee_callback = self._deduct_gas_fee
+            self.executor.on_position_confirmed = self._confirm_position
 
         # Alerts (stub)
         self.alerter = Alerter(self.config.get("monitoring", {}))
@@ -161,6 +165,14 @@ class PolyClawCipherV3:
         # Connect DB + load wallet
         await self.db.connect()
         await self.wallet.load()
+
+        # v3.5.17: Live mode — full CLOB reconciliation at startup
+        live_mode = os.environ.get("BOT_MODE", "") == "live"
+        if live_mode and hasattr(self, 'executor') and self.executor.enabled:
+            from .execution.reconcile import reconcile_from_clob
+            await reconcile_from_clob(self.executor, self.wallet, self.position_repo, self.trade_repo)
+            self._last_clob_sync = time.time()
+
         self.risk.init(self.wallet.bankroll)
 
         # v3.4.0 FIX (ARCH-3): Restore strategy states (entry prices/times) from open positions in DB
@@ -244,11 +256,27 @@ class PolyClawCipherV3:
     async def _loop(self, scan_interval: float, loop_interval: float) -> None:
         now = time.time()
 
+        # v3.5.17: Periodic CLOB reconciliation (every 5 min) for live mode
+        live_mode = os.environ.get("BOT_MODE", "") == "live"
+        if live_mode and hasattr(self, 'executor') and self.executor.enabled:
+            last_clob_sync = getattr(self, '_last_clob_sync', 0)
+            if now - last_clob_sync >= 300:  # 5 minutes
+                from .execution.reconcile import reconcile_from_clob
+                await reconcile_from_clob(self.executor, self.wallet, self.position_repo, self.trade_repo, getattr(self, '_markets', None))
+                self._last_clob_sync = now
+
         # Scan markets
         if now - self._last_scan >= scan_interval or not self._markets:
             logger.info("Scanning markets...")
             self._markets = await self.scanner.scan()
             self._last_scan = now
+            
+            # One-time: reconcile positions immediately after first scan
+            if live_mode and not getattr(self, '_markets_reconciled', False):
+                self._markets_reconciled = True
+                from .execution.reconcile import reconcile_from_clob
+                await reconcile_from_clob(self.executor, self.wallet, self.position_repo, self.trade_repo, self._markets)
+            
             crypto_markets = [m for m in self._markets if m.is_crypto_up_down]
             # Log market categories
             from collections import Counter
@@ -306,10 +334,26 @@ class PolyClawCipherV3:
         # v3.5.1: Log strategy evaluation summary (every ~30s to avoid spam)
         if self._signals_this_cycle > 0 or (time.time() - (self._last_summary_log or 0)) > 30:
             self._last_summary_log = time.time()
+            # Momentum debug counters
+            mm = None
+            if isinstance(self.strategies, dict):
+                mm = self.strategies.get('momentum')
+            else:
+                for s in self.strategies:
+                    if getattr(s, 'name', '') == 'momentum':
+                        mm = s
+                        break
+            dbg_str = ""
+            if mm and hasattr(mm, 'get_debug_stats'):
+                dbg = mm.get_debug_stats()
+                active = {k:v for k,v in dbg.items() if v > 0}
+                if active:
+                    dbg_str = " | dbg: " + " ".join(f"{k}={v}" for k,v in sorted(active.items()))
             logger.info(
-                "Strategy eval cycle: %d markets, %d signals | %s",
+                "Strategy eval cycle: %d markets, %d signals | %s%s",
                 markets_tried, self._signals_this_cycle,
-                ", ".join(f"{k}={v}" for k, v in strat_signal_counts.items())
+                ", ".join(f"{k}={v}" for k, v in strat_signal_counts.items()),
+                dbg_str
             )
 
         await asyncio.sleep(loop_interval)
@@ -403,6 +447,31 @@ class PolyClawCipherV3:
             logger.warning("Signal blocked (insufficient available cash due to pending orders): need $%.2f", required_cash)
             return
 
+        # v3.5.17: Live mode — dynamic sizing to meet CLOB minimum 5 shares
+        # Gemini recommendation: upsize to meet minimum, don't block signals
+        live_mode = os.environ.get("BOT_MODE", "") == "live"
+        if live_mode:
+            min_shares = 5
+            min_usd_needed = min_shares * signal.suggested_price
+            if signal.suggested_size_usd < min_usd_needed:
+                # Upsize to meet 5-share minimum (Gemini dynamic sizer)
+                upsized_notional = min_usd_needed
+                max_allowed = self.wallet.bankroll * self.risk.get_strategy_capital_pct(strat.name)
+                if upsized_notional <= max_allowed and self.wallet.has_funds(upsized_notional):
+                    logger.info(
+                        "Signal upsized for CLOB 5-share min: $%.2f → $%.2f (%.0f shares @ $%.4f)",
+                        signal.suggested_size_usd, upsized_notional,
+                        min_shares, signal.suggested_price,
+                    )
+                    signal = signal.model_copy(update={"suggested_size_usd": round(upsized_notional, 2)})
+                    required_cash = upsized_notional  # update required_cash for wallet check below
+                else:
+                    await self.signal_repo.log_signal(signal, executed=False,
+                        rejected_reason=f"below_clob_min_size_insufficient_funds (need ${min_usd_needed:.2f}, max ${max_allowed:.2f})")
+                    logger.warning("Signal blocked (CLOB min 5 shares + no budget): need $%.2f, max $%.2f",
+                                   min_usd_needed, max_allowed)
+                    return
+
         self.wallet.reserve(required_cash)
 
         try:
@@ -465,8 +534,9 @@ class PolyClawCipherV3:
                     strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
 
             # Update bankroll + refresh cached positions
-            invested = await self.position_repo.total_invested()
-            await self.wallet.set_bankroll(self.wallet.cash + invested)
+            # v3.6.0: Use current_value (market price) not invested (cost basis)
+            current_val = await self.position_repo.total_current_value()
+            await self.wallet.set_bankroll(self.wallet.cash + current_val)
             self._cached_open_positions = await self.position_repo.get_open_positions()
 
             await self.alerter.notify_trade(
@@ -476,15 +546,18 @@ class PolyClawCipherV3:
         finally:
             self.wallet.release(required_cash)
 
+        
+
     async def _manage_positions(self) -> None:
         """Check open positions for resolution, TP/SL.
 
         v3.4.3 FIX: When market is not in active scan (market_map returns None),
-        fetch it from Gamma API to check if it's resolved. Previously, resolved
-        markets dropped out of scan (scanner queries active=true only) and positions
-        stayed open FOREVER - locking cash indefinitely.
+        fetch it from Gamma API to check if it's resolved.
+
+        BATCH 1 FIXES:
+        - BUG-12: Price fallback chain for TP/SL (CLOB WS → pos.current_price → entry_price)
+        - BUG-13: Use executor.is_exiting() instead of _pending_close_tokens (prevents stuck positions)
         """
-        # v3.4.0 FIX (BUG-C7): Use cached positions
         positions = self._cached_open_positions
         if not positions:
             return
@@ -492,32 +565,35 @@ class PolyClawCipherV3:
         market_map = {m.condition_id: m for m in self._markets}
 
         for pos in positions[:]:
-            # v3.5.13: Skip PENDING positions - cannot exit until on-chain confirmed
-            # This prevents "exit fails, position stuck" bug in live trading
-            # v3.5.13 FIX: Auto-confirm if pending > 10s (safety net for failed asyncio tasks)
+            # v3.5.13: Skip PENDING positions
             if self._is_position_pending(pos.id):
                 if time.time() - pos.opened_at > 10:
                     self._pending_positions.discard(pos.id)
-                    logger.warning("Position %s auto-confirmed (PENDING > 10s safety timeout)", pos.id[:8])
+                    logger.warning("Position %s auto-confirmed (PENDING > 10s)", pos.id[:8])
                 else:
                     continue
 
             market = market_map.get(pos.market_condition_id)
 
-            # v3.4.3 FIX: If market not in active scan, fetch from Gamma API
-            # This handles resolved markets that dropped out of scan (active=true filter)
+            # Skip sub-5-share in live mode
+            if os.environ.get("BOT_MODE", "") == "live" and pos.shares < 5:
+                continue
+
+            # Skip resolved positions
+            if pos.current_price is not None and pos.current_price <= 0.001 and pos.shares > 0:
+                continue
+
+            # v3.4.3: Fetch resolved market from Gamma API
             if market is None:
                 try:
                     market = await self.scanner.fetch_market(pos.market_condition_id)
                     if market and market.is_closed:
-                        logger.info(
-                            "Position %s market resolved (was not in active scan): %s",
-                            pos.id, pos.market_question[:40],
-                        )
+                        logger.info("Position %s market resolved: %s",
+                                   pos.id, pos.market_question[:40])
                 except Exception as e:
                     logger.debug("Failed to fetch market %s: %s", pos.market_condition_id[:8], e)
 
-            # Resolution check - real, not fake
+            # ─── Resolution check ───────────────────────────────────────────
             if market and market.is_closed:
                 winner = get_winning_side(market)
                 if winner is not None:
@@ -525,52 +601,91 @@ class PolyClawCipherV3:
                     await self._close_position(pos, trade, strat_name=pos.strategy)
                     continue
 
-            # TP/SL check via strategy
+            # ─── TP/SL check via strategy ───────────────────────────────────
             strat = self._find_strategy(pos.strategy)
             if strat and market and hasattr(strat, "check_exit"):
-                # Get current price from CLOB WS
-                current = self.clob_feed.get_price(pos.token_id)
+                # BATCH 1 FIX — BUG-13: Use is_exiting() instead of _pending_close_tokens
+                # This allows retry after exit_retry_delay_sec instead of blocking forever
+                if hasattr(self.executor, 'is_exiting') and self.executor.is_exiting(pos.token_id):
+                    logger.debug("Position %s exit in progress — skipping check", pos.id[:8])
+                    continue
+
+                # Auto-register entry if missing (reconcile-created positions)
+                if hasattr(strat, "register_entry"):
+                    curr_entry = getattr(strat, "_entry_prices", {}).get(pos.id)
+                    if curr_entry is None or curr_entry <= 0:
+                        try:
+                            strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price, pos.invested)
+                        except TypeError:
+                            strat.register_entry(pos.id, pos.market_condition_id, pos.entry_price)
+                        logger.info("Auto-registered entry for %s: @ $%.4f", pos.id[:8], pos.entry_price)
+
+                # ─── BATCH 1 FIX — BUG-12: Price fallback chain ──────────────
+                # Priority: CLOB WS real-time → pos.current_price (from reconcile) → entry_price
+                current = 0.0
+                if self.clob_feed:
+                    current = self.clob_feed.get_price(pos.token_id)
+                if current <= 0 and pos.current_price > 0:
+                    # Fallback 1: Use price from last Data API reconcile
+                    current = pos.current_price
+                    if current > 0:
+                        logger.debug("Price fallback (reconcile) for %s: $%.4f", pos.token_id[:12], current)
+                if current <= 0:
+                    # Fallback 2: Use entry_price (worst case — won't trigger TP/SL but allows close)
+                    current = pos.entry_price
+                    if current > 0:
+                        logger.debug("Price fallback (entry) for %s: $%.4f", pos.token_id[:12], current)
+
                 if current > 0:
                     should_exit, exit_reason = strat.check_exit(pos.id, pos.market_condition_id, current)
                     if should_exit:
-                        trade = await self.executor.close_position(pos, current, exit_reason,
-                                                                     market_volume_24h=market.volume_24h if market else 0)
+                        trade = await self.executor.close_position(
+                            pos, current, exit_reason,
+                            market_volume_24h=market.volume_24h if market else 0,
+                        )
+                        # BATCH 1 FIX — BUG-14: _close_position already handles trade=None (line 942)
                         await self._close_position(pos, trade, strat_name=pos.strategy)
 
-            # v3.5.5 FIX (P1-05): Force-close stale positions to free cash.
-            # Two-tier logic:
-            #   - 30 min (max_position_age_sec): close ALL stale positions (default)
-            #   - 15 min + 0% PnL (dead_position_age_sec): close "dead" positions sooner
-            #     These are positions in nearly-resolved markets where price hasn't moved
-            #     at all - they just trap cash without any profit potential.
+            # ─── Stale position force-close ─────────────────────────────────
             pos_age_sec = time.time() - pos.opened_at
             max_age = getattr(self, 'max_position_age_sec', 1800)
-            dead_age = getattr(self, 'dead_position_age_sec', 900)  # 15 min
+            dead_age = getattr(self, 'dead_position_age_sec', 900)
 
             if pos_age_sec > max_age:
-                # Standard stale close (was 1.0h, now 30 min)
-                current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
+                # BATCH 1 FIX — BUG-12: Use same price fallback for stale close
+                current = 0.0
+                if self.clob_feed:
+                    current = self.clob_feed.get_price(pos.token_id)
+                if current <= 0 and pos.current_price > 0:
+                    current = pos.current_price
                 if current <= 0:
                     current = pos.entry_price
-                trade = await self.executor.close_position(pos, current, "Force-close stale ({:.1f}h)".format(pos_age_sec/3600),
-                                                             market_volume_24h=market.volume_24h if market else 0)
+
+                trade = await self.executor.close_position(
+                    pos, current, f"Force-close stale ({pos_age_sec/3600:.1f}h)",
+                    market_volume_24h=market.volume_24h if market else 0,
+                )
                 await self._close_position(pos, trade, strat_name=pos.strategy)
                 logger.info("STALE CLOSE: %s age=%.1fh price=%.4f", pos.id[:8], pos_age_sec/3600, current)
-                continue  # Skip further processing since position was closed
+                continue
 
             if pos_age_sec > dead_age:
-                # v3.5.5: Dead position check - if PnL is exactly 0%, market is "dead"
-                # (entry_price == current_price means no movement, likely nearly-resolved)
-                current = self.clob_feed.get_price(pos.token_id) if self.clob_feed else 0
-                if current > 0 and abs(current - pos.entry_price) < 0.001:
-                    trade = await self.executor.close_position(pos, current, "Force-close dead (0% PnL, {:.1f}h)".format(pos_age_sec/3600),
-                                                                 market_volume_24h=market.volume_24h if market else 0)
-                    await self._close_position(pos, trade, strat_name=pos.strategy)
-                    logger.info("DEAD CLOSE: %s age=%.1fh entry=%.4f current=%.4f (no movement)",
-                                pos.id[:8], pos_age_sec/3600, pos.entry_price, current)
-                    continue
+                # BATCH 1 FIX — BUG-12: Same price fallback for dead position check
+                current = 0.0
+                if self.clob_feed:
+                    current = self.clob_feed.get_price(pos.token_id)
+                if current <= 0 and pos.current_price > 0:
+                    current = pos.current_price
 
-    # v3.5.13: Live-realism callback methods
+                if current > 0 and abs(current - pos.entry_price) < 0.001:
+                    trade = await self.executor.close_position(
+                        pos, current, f"Force-close dead (0% PnL, {pos_age_sec/3600:.1f}h)",
+                        market_volume_24h=market.volume_24h if market else 0,
+                    )
+                    await self._close_position(pos, trade, strat_name=pos.strategy)
+                    logger.info("DEAD CLOSE: %s age=%.1fh entry=%.4f current=%.4f",
+                               pos.id[:8], pos_age_sec/3600, pos.entry_price, current)
+                    continue
 
     def _auto_tune_from_history(self) -> None:
         """v3.5.16: Auto-tune from master_history.db with decay weighting.
@@ -848,6 +963,18 @@ class PolyClawCipherV3:
         between concurrent close attempts (e.g., resolution + TP/SL).
         """
         async with self._position_lock:
+            # v3.5.17: Handle None return from LiveExecutor (CLOB close failed)
+            if trade is None:
+                # Add retry cooldown to prevent spam (e.g., sub-5-share positions)
+                if not hasattr(self, '_close_retry_cooldown'):
+                    self._close_retry_cooldown: dict = {}
+                now_ts = time.time()
+                last = self._close_retry_cooldown.get(pos.id, 0)
+                if now_ts - last < 60:  # 60 second cooldown
+                    return  # Skip retry, too soon
+                self._close_retry_cooldown[pos.id] = now_ts
+                logger.warning("Close returned None for %s — position stays open, will retry", pos.id[:8])
+                return
             # v3.4.0: Check position still exists before closing (optimistic lock)
             still_open = await self.position_repo.close_position(pos.id)
             if still_open is None:
@@ -874,8 +1001,9 @@ class PolyClawCipherV3:
             if hasattr(strat, "clear_position"):
                 strat.clear_position(pos.id, pos.market_condition_id)
         # Update bankroll + refresh cached positions
-        invested = await self.position_repo.total_invested()
-        await self.wallet.set_bankroll(self.wallet.cash + invested)
+        # v3.6.0: Use current_value (market price) not invested (cost basis)
+        current_val = await self.position_repo.total_current_value()
+        await self.wallet.set_bankroll(self.wallet.cash + current_val)
         self._cached_open_positions = await self.position_repo.get_open_positions()
         # Alert
         await self.alerter.notify_trade_close(
@@ -1059,22 +1187,42 @@ class PolyClawCipherV3:
 
 # WALLET INVARIANT CHECK (BUG-1 fix):
                 # bankroll MUST == cash + total_invested. If not, recalculate from DB truth.
+                # v3.5.17: Skip in live mode — CLOB balance includes locked orders which invariant doesn't account for
+                _live = os.environ.get("BOT_MODE", "") == "live"
                 invested = await self.position_repo.total_invested()
-                expected_bankroll = round(self.wallet.cash + invested, 4)
-                cached_bankroll = round(self.wallet.bankroll, 4)
-                if abs(expected_bankroll - cached_bankroll) > 0.01:
-                    logger.error(
-                        "WALLET INVARIANT VIOLATION: cash=%.4f + invested=%.4f = %.4f, but bankroll=%.4f (diff=%.4f). Recalculating.",
-                        self.wallet.cash, invested, expected_bankroll, cached_bankroll,
-                        expected_bankroll - cached_bankroll,
+                if not _live:
+                    expected_bankroll = round(self.wallet.cash + invested, 4)
+                    cached_bankroll = round(self.wallet.bankroll, 4)
+                    if abs(expected_bankroll - cached_bankroll) > 0.01:
+                        logger.error(
+                            "WALLET INVARIANT VIOLATION: cash=%.4f + invested=%.4f = %.4f, but bankroll=%.4f (diff=%.4f). Recalculating.",
+                            self.wallet.cash, invested, expected_bankroll, cached_bankroll,
+                            expected_bankroll - cached_bankroll,
+                        )
+                        await self.wallet.set_bankroll(expected_bankroll)
+                    deployed = invested  # paper: cost basis
+                else:
+                    # Live mode: bankroll = cash + current_value (market equity from CLOB feed)
+                    # Using current_value (price × shares) NOT invested (cost basis)
+                    # because bankroll should reflect liquidatable equity for sizer
+                    current_value = sum(
+                        (p.current_price or 0) * p.shares
+                        for p in open_positions
                     )
-                    await self.wallet.set_bankroll(expected_bankroll)
+                    # Live mode: trust the reconcile (Data API ground truth) — don't override
+                    # DB prices may be stale; reconcile provides correct bankroll every 5 min
+                    expected_bankroll = round(self.wallet.bankroll, 4)
+                    deployed = round(self.wallet.bankroll - self.wallet.cash, 4)
 
                 stats["bankroll"] = expected_bankroll
                 stats["cash"] = round(self.wallet.cash, 4)
                 stats["pnl"] = round(expected_bankroll - self.wallet.initial_bankroll, 4)
-                stats["deployed"] = round(invested, 4)
+                stats["deployed"] = round(deployed, 4)
                 stats["last_stats_refresh"] = time.time()
+                
+                # Paper mode only: keep wallet.bankroll in sync with DB calculation
+                if not _live and abs(self.wallet.bankroll - expected_bankroll) > 0.01:
+                    await self.wallet.set_bankroll(expected_bankroll)
 
                 # v3.5.0: Bot status computation (Arena.ai recommendation)
                 # v3.5.5: Use __version__ from package instead of hardcoded string
