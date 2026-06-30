@@ -58,6 +58,10 @@ strategies:
     min_momentum_long_pct: 0.25
     min_momentum_short_pct: 0.5
     min_position_usd: 1.0
+    vol_spike_enabled: true
+    vol_spike_threshold: 3.0
+    vol_spike_boost: 0.15
+    vol_spike_confidence_boost: 0.10
     stop_loss_pct: 4.0
     take_profit_pct: 8.0
   resolution_snipe:
