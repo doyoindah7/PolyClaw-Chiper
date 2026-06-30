@@ -260,7 +260,7 @@ class PolyClawCipherV3:
         live_mode = os.environ.get("BOT_MODE", "") == "live"
         if live_mode and hasattr(self, 'executor') and self.executor.enabled:
             last_clob_sync = getattr(self, '_last_clob_sync', 0)
-            if now - last_clob_sync >= 300:  # 5 minutes
+            if now - last_clob_sync >= 60:  # 1 minute (safe: tight sync for live wallet divergence)
                 from .execution.reconcile import reconcile_from_clob
                 await reconcile_from_clob(self.executor, self.wallet, self.position_repo, self.trade_repo, getattr(self, '_markets', None))
                 self._last_clob_sync = now
