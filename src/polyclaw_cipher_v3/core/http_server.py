@@ -979,9 +979,11 @@ function renderHistoryTable() {
 
   let html = '<table class="tbl"><thead><tr>' +
     '<th>Market</th><th>Side</th><th>Shares</th><th>Invested</th><th>Entry</th><th>Exit</th>' +
-    '<th>PnL $</th><th>PnL %</th><th>Reason</th><th>When</th>' +
+    '<th>PnL $</th><th>PnL %</th><th>Reason</th><th>When</th><th>Age</th>' +
     '</tr></thead><tbody>';
   for (const t of trades) {
+    const ageSec = t.closed_at - t.opened_at;
+    const ageStr = ageSec < 60 ? Math.round(ageSec) + 's' : ageSec < 3600 ? Math.round(ageSec/60) + 'm' : (ageSec/3600).toFixed(1) + 'h';
     const pnlCls = t.pnl_dollar >= 0 ? 'pnl-pos' : 'pnl-neg';
     const safeQ = (t.market_question||'').replace(/"/g,'&quot;');
     const safeR = (t.reason||'').replace(/"/g,'&quot;');
@@ -996,6 +998,7 @@ function renderHistoryTable() {
       '<td class="' + pnlCls + '">' + (t.pnl_percent>=0?'+':'') + fmt(t.pnl_percent, 1) + '%</td>' +
       '<td style="color:var(--muted);font-size:0.6rem;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + safeR + '">' + (t.reason||'') + '</td>' +
       '<td style="color:var(--muted);font-size:0.65rem">' + timeAgo(t.closed_at) + '</td>' +
+      '<td style="color:var(--muted);font-size:0.65rem">' + ageStr + '</td>' +
       '</tr>';
     // Expandable detail row (hidden by default)
     const date = new Date(t.closed_at * 1000).toISOString().replace('T',' ').substring(0,19);

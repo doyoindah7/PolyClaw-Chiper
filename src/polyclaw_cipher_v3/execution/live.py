@@ -122,6 +122,17 @@ class LiveExecutor:
         self._cleanup_task: asyncio.Task | None = None
         self._running = False
 
+        # ─── Precision Cache (v3.5.19: validate locally, not on CLOB) ───────
+        # token_id -> {"tick_size": float, "min_size": float, "neg_risk": bool}
+        self._precision_cache: dict[str, dict] = {}
+        self._precision_cache_ttl = 300
+
+        # ─── Circuit Breaker (v3.5.19: freeze entries on anomaly) ──────────
+        self._cb_failures: list[float] = []  # timestamps of recent failures
+        self._cb_frozen: bool = False        # True = entries BLOCKED, exits only
+        self._cb_frozen_at: float = 0.0
+        self._cb_frozen_reason: str = ""  # refresh every 5 min
+
         if not all([self._private_key, self._l2_key]):
             logger.warning(
                 "LiveExecutor: missing PRIVATE_KEY or POLYMARKET_API_KEY — "
@@ -208,6 +219,10 @@ class LiveExecutor:
             logger.warning("LiveExecutor: disabled, skipping entry")
             return None
 
+        # v3.5.19: Circuit breaker — freeze entries on anomaly cascade
+        if not self._circuit_breaker_ok():
+            return None
+
         client = self._ensure_client()
 
         token_id = ""
@@ -239,13 +254,15 @@ class LiveExecutor:
             logger.error("LIVE ENTRY REJECTED: size=0 (price=%.3f, usd=%.2f)", price, order_usd)
             return None
 
-        # FIX: precision guard for cheap tokens ("maker 2 decimals, taker 5 decimals")
-        size, price = self._round_order_amounts(raw_size, price)
+        # FIX: precision cache — validate locally before hitting CLOB
+        prec = await self._get_market_precision(token_id)
+        size, price = self._round_order_amounts(raw_size, price, token_id)
+        actual_usd = round(size * price, 2)
 
-        if size < MIN_ORDER_SIZE:
+        if size < prec.get("min_size", MIN_ORDER_SIZE):
             logger.warning(
-                "LIVE ENTRY REJECTED: size %.2f < min %d shares after rounding",
-                size, MIN_ORDER_SIZE,
+                "LIVE ENTRY REJECTED: size %.2f < min %.0f shares (precision=%s)",
+                size, prec.get("min_size", MIN_ORDER_SIZE), prec.get("tick_size"),
             )
             return None
 
@@ -301,18 +318,88 @@ class LiveExecutor:
                     return self._build_position(signal, token_id, price, size, market_question)
 
                 logger.info("LIVE ENTRY not filled (status=%s) — book too thin, skipping", status)
+                self._record_cb_failure(f"entry_not_filled:{status}")
                 return None
 
             except Exception as e:
                 logger.error("LIVE ENTRY FAILED: %s", e, exc_info=True)
+                self._record_cb_failure(f"entry_exception:{type(e).__name__}")
                 return None
 
-    def _round_order_amounts(self, size: float, price: float) -> tuple[float, float]:
-        """Round size/price for CLOB precision: price→4dp, size→2dp.
+    async def _get_market_precision(self, token_id: str) -> dict:
+        """Fetch and cache market precision (tick_size, min_size, neg_risk).
 
-        FIX for "maker amount max 2 decimals, taker amount max 5 decimals".
+        v3.5.19: Validate orders locally before sending to CLOB.
+        Much cheaper than round-tripping a CLOB rejection.
         """
-        return round(size, 2), round(price, 4)
+        now = time.time()
+        cached = self._precision_cache.get(token_id)
+        if cached and (now - cached.get("_fetched_ts", 0)) < self._precision_cache_ttl:
+            return cached
+
+        client = self._ensure_client()
+        try:
+            tick_size = float(client.get_tick_size(token_id))
+        except Exception:
+            tick_size = 0.01
+        try:
+            neg_risk = client.get_neg_risk(token_id)
+        except Exception:
+            neg_risk = False
+        # min_order_size: CLOB minimum 5 shares, API may return higher
+        try:
+            min_size = float(client.get_min_order_size(token_id) or 5)
+        except Exception:
+            min_size = 5.0
+
+        entry = {"tick_size": tick_size, "min_size": max(5.0, min_size), "neg_risk": neg_risk, "_fetched_ts": now}
+        self._precision_cache[token_id] = entry
+        return entry
+
+    def _round_order_amounts(self, size: float, price: float, token_id: str = "") -> tuple[float, float]:
+        """Round size/price for CLOB precision using cached market data."""
+        prec = self._precision_cache.get(token_id, {})
+        tick = prec.get("tick_size", 0.01)
+        # Round price to tick precision, size to 2 dp (CLOB standard)
+        decimals = max(0, abs(round(__import__('math').log10(tick)))) if tick > 0 else 2
+        price_r = round(round(price / tick) * tick, decimals + 2)
+        size_r = round(size, 2)
+        return size_r, price_r
+
+    def _circuit_breaker_ok(self) -> bool:
+        """Check if circuit breaker allows new entries.
+
+        v3.5.19: Freeze ALL entries if >= 5 failures in 60s.
+        Exits always allowed. Auto-reset after 5min cooldown.
+        """
+        if not self._cb_frozen:
+            return True
+        # Auto-reset after 5 min cooldown
+        if time.time() - self._cb_frozen_at > 300:
+            logger.warning("CIRCUIT BREAKER: auto-reset after 5min cooldown (reason: %s)", self._cb_frozen_reason)
+            self._cb_frozen = False
+            self._cb_failures.clear()
+            return True
+        logger.warning("CIRCUIT BREAKER: entries FROZEN (reason: %s, %.0fs remaining)",
+                      self._cb_frozen_reason, 300 - (time.time() - self._cb_frozen_at))
+        return False
+
+    def _record_cb_failure(self, reason: str) -> None:
+        """Record a failure for circuit breaker tracking."""
+        now = time.time()
+        self._cb_failures.append(now)
+        # Keep only last 60s of failures
+        self._cb_failures = [t for t in self._cb_failures if now - t < 60]
+
+        if len(self._cb_failures) >= 5 and not self._cb_frozen:
+            self._cb_frozen = True
+            self._cb_frozen_at = now
+            self._cb_frozen_reason = reason
+            logger.critical(
+                "CIRCUIT BREAKER TRIPPED: %d failures in 60s (reason: %s). "
+                "ALL ENTRIES FROZEN. Exits still allowed. Auto-reset in 5min.",
+                len(self._cb_failures), reason,
+            )
 
     async def close_position(
         self, pos: Position, exit_price: float, reason: str, **kwargs
@@ -422,6 +509,7 @@ class LiveExecutor:
                 "LIVE CLOSE FOK did not fill: status=%s — retry %d/3 in %ds",
                 status, retry_count + 1, backoff,
             )
+            self._record_cb_failure(f"exit_not_filled:{status}")
             return None
 
         except Exception as e:
@@ -429,6 +517,7 @@ class LiveExecutor:
                 "LIVE CLOSE FAILED: %s (exit_price=%.3f) — retry %d/3 in %ds",
                 e, exit_price, retry_count + 1, backoff,
             )
+            self._record_cb_failure(f"close_exception:{type(e).__name__}")
             return None
 
         finally:
