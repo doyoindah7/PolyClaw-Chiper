@@ -1,0 +1,29 @@
+services:
+  polyclaw-cipher-v3:
+    build:
+      context: .
+    container_name: polyclaw-cipher-v3
+    restart: unless-stopped
+    volumes:
+      - /home/ubuntu/polyclaw-cipher-v3/data:/app/data
+      - /home/ubuntu/polyclaw-cipher-v3/config:/app/config:ro
+    environment:
+      - BOT_MODE=paper
+      - HTTP_PORT=8082
+      - INITIAL_BANKROLL_USD=25.0
+      - TG_BOT_TOKEN=8823623175:AAEr9Rw_y4caPN8LUga-UtYY8izvBcL5vgo
+      - TG_CHAT_ID=2051570522
+      - TG_INSTANCE_LABEL=Cipher
+      - TG_ALERT_TRADES=0
+      - EXECUTION_MODE=paper
+      - SKIP_AUTO_TUNE=1
+      - DYNAMIC_CASH_BUFFER=false
+      - CASH_MIN_PCT=5
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

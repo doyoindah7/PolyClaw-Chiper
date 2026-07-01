@@ -483,6 +483,7 @@ class PolyClawCipherV3:
             )
             if pos is None:
                 await self.signal_repo.log_signal(signal, executed=False, rejected_reason="fill_rejected")
+                self.wallet.release(required_cash)  # v3.5.19: release reserve on fill reject
                 return
 
             # v3.5.13: Mark position as PENDING (will be confirmed after on-chain delay)

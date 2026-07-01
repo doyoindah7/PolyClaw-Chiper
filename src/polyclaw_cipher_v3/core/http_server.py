@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """HTTP server — FastAPI + v3-only dashboard (full width, detailed).
 
 Bind to 0.0.0.0:8082 (public access).
@@ -12,6 +13,7 @@ After v2 stopped, dashboard is v3-only with:
 - Config summary
 """
 from __future__ import annotations
+import aiohttp
 
 import asyncio
 import logging
@@ -41,6 +43,19 @@ METRICS = {
     "btc_price": Gauge("polyclaw_btc_price_usd", "Real-time BTC price from Binance stream"),
     "uptime": Gauge("polyclaw_uptime_seconds", "Bot process uptime in seconds"),
 }
+
+def _parse_ts(val) -> float:
+    """Parse various timestamp formats to Unix epoch float."""
+    if not val:
+        return 0.0
+    try:
+        if isinstance(val, (int, float)):
+            return float(val) if val > 10000000000 else float(val) * 1000
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        return dt.timestamp()
+    except Exception:
+        return 0.0
 
 
 class HTTPServer:
@@ -102,6 +117,45 @@ class HTTPServer:
             if self.get_stats:
                 return JSONResponse(self.get_stats())
             return JSONResponse({"error": "stats callback not set"}, status_code=500)
+
+        @self.app.get("/api/poly_positions")
+        async def poly_positions():
+            """Fetch real positions from Polymarket Data API (source of truth)."""
+            funder = os.environ.get("LIVE_FUNDER", "0xf9f38a1dc12fc665222734cf73b1a8f5daf24e9a")
+            try:
+                url = f"https://data-api.polymarket.com/positions?user={funder}"
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            return JSONResponse({"error": f"Poly API {resp.status}"}, status_code=502)
+                        data = await resp.json()
+                active = []
+                for p in data:
+                    size = float(p.get("size", 0))
+                    if size < 0.01 or p.get("redeemable", True):
+                        continue
+                    cur_val = float(p.get("currentValue", 0) or 0)
+                    avg_px = float(p.get("avgPrice", 0) or 0)
+                    cur_px = float(p.get("curPrice", 0) or 0)
+                    if cur_px <= 0:
+                        cur_px = avg_px
+                    side = p.get("outcome", "?")
+                    title = p.get("title", "?")
+                    active.append({
+                        "side": side,
+                        "shares": size,
+                        "entry_price": avg_px,
+                        "current_price": cur_px,
+                        "current_value": cur_val,
+                        "invested": size * avg_px,
+                        "market_question": title,
+                        "token_id": p.get("asset", ""),
+                        "opened_at": _parse_ts(p.get("createdAt") or p.get("updatedAt")),  # for dashboard age
+                    })
+                return JSONResponse({"positions": active, "count": len(active)})
+            except Exception as e:
+                logger.warning(f"Poly positions API error: {e}")
+                return JSONResponse({"positions": [], "count": 0, "error": str(e)[:100]})
 
         @self.app.get("/api/health")
         async def health():
@@ -231,7 +285,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🔍 PolyClaw-Cipher v3.5.15</title>
+<title>PolyClaw-Cipher v3.5.15</title>
 <style>
 :root {
   --bg: #0a0e14; --card: #131820; --card2: #0f141c; --border: #1e2836;
@@ -621,15 +675,28 @@ function renderKPIs(d) {
 }
 
 function renderPositions(d) {
+  // Fetch positions from Poly API async, then render
+  fetch('/api/poly_positions').then(r => r.json()).then(pd => {
+    renderPositionsFromPoly(pd.positions || []);
+  }).catch(() => {
+    // Fallback to bot DB positions
+    renderPositionsFromPoly((d.open_positions || []).map(p => ({
+      side: p.side, shares: p.shares, entry_price: p.entry_price,
+      current_price: p.current_price, current_value: p.current_value || p.invested,
+      invested: p.invested, market_question: p.market_question
+    })));
+  });
+}
+
+function renderPositionsFromPoly(positions) {
   const cont = document.getElementById('positions-container');
-  const positions = d.open_positions || [];
   document.getElementById('pos-count').textContent = positions.length;
   if (positions.length === 0) {
     cont.innerHTML = '<div class="empty">No open positions</div>';
     return;
   }
   let html = '<table class="tbl"><thead><tr>' +
-    '<th>Market</th><th>Side</th><th>Strat</th><th>Entry</th><th>Cur</th><th>Invested</th><th>Cur Val</th><th>Unreal P&L</th><th>Age</th>' +
+    '<th>Market</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cur</th><th>Invested</th><th>Cur Val</th><th>Unreal P&L</th><th>Age</th>' +
     '</tr></thead><tbody>';
   for (const p of positions) {
     const curVal = p.current_value || p.invested;
@@ -641,7 +708,7 @@ function renderPositions(d) {
     html += '<tr>' +
       '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + (p.market_question||'').replace(/"/g,'&quot;') + '">' + (p.market_question||'').substring(0,40) + '</td>' +
       '<td class="side-' + (p.side||'') + '">' + (p.side||'') + '</td>' +
-      '<td><span class="tag ' + strat + '">' + strat + '</span>' + pairBadge + '</td>' +
+      '<td>' + fmt(p.shares || 0, 1) + '</td>' +
       '<td>$' + fmt(p.entry_price, 4) + '</td>' +
       '<td>$' + fmt(p.current_price, 4) + '</td>' +
       '<td>$' + fmt(p.invested, 2) + '</td>' +

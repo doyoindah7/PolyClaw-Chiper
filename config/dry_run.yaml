@@ -1,0 +1,46 @@
+# PolyClaw-Cipher v3.5.19 — DRY RUN (isolated container)
+# Terminal terpisah dari live bot — port 8091, data data_dryrun/
+bot:
+  scan_interval_sec: 15
+  loop_interval_sec: 1
+  max_open_positions: 1
+
+risk:
+  initial_bankroll_usd: 3.62
+  max_consecutive_losses_global: 2
+  max_daily_drawdown_pct: 30.0
+  max_trades_per_hour_global: 3
+  sizer:
+    min_position_usd: 0.9
+    max_pct_per_trade: 0.35
+    cash_min_pct: 5
+    max_open_positions: 1
+    max_absolute_position: 0.9  # HARD CAP
+    dynamic_cash_buffer: false  # Use cash, not zombie equity
+  per_strategy:
+    momentum:
+      max_capital_pct: 0.35
+      max_consecutive_losses: 2
+      max_trades_per_hour: 3
+
+strategies:
+  momentum:
+    max_positions: 1
+    min_entry_price: 0.10
+    max_entry_price: 0.95
+    min_position_usd: 0.9
+    max_per_market_pct: 0.30
+    max_notional_pct: 0.35
+    # Signal thresholds — match paper's aggressive settings
+    min_momentum_short_pct: 0.5   # was 1.0 (default)
+    min_momentum_long_pct: 0.25   # was 0.5 (default)
+    # Exit params — tight for testing
+    take_profit_pct: 3.0
+    stop_loss_pct: 3.0
+    max_hold_sec: 150
+    cooldown_sec: 30
+    vol_spike_enabled: false
+    force_signal_mode: false
+
+tier:
+  force_tier: 0
