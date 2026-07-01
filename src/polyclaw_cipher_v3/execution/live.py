@@ -197,14 +197,12 @@ class LiveExecutor:
     async def execute_entry(
         self, signal: Signal, market_question: str, bankroll: float, **kwargs
     ) -> Position | None:
-        """Place live BUY order with proper lifecycle management.
+        """Place live BUY via FOK — fills now or fails now, never rests on book.
 
-        Flow:
-            1. Check allowance (free USDC on CLOB)
-            2. Place BUY order (GTC)
-            3. If "matched": create Position, return it
-            4. If "live": track order, start timeout, return None
-            5. If timeout: auto-cancel order
+        FIX (claude-exit-fix v2): entry was GTC → multiple BUY orders could
+        sit "live" simultaneously, locking allowance > actual balance.
+        With FOK: matched = real position, failed = nothing created,
+        no allowance locked, no PENDING state needed.
         """
         if not self.enabled:
             logger.warning("LiveExecutor: disabled, skipping entry")
@@ -212,54 +210,47 @@ class LiveExecutor:
 
         client = self._ensure_client()
 
-        # ─── FIX BUG-2: Safe token_id extraction ──────────────────────────
         token_id = ""
         if signal.token_id:
             token_id = signal.token_id
         elif signal.legs and len(signal.legs) > 0:
             token_id = signal.legs[0].token_id
         if not token_id:
-            logger.error("LiveExecutor: no token_id in signal (legs=%d)", len(signal.legs) if signal.legs else 0)
+            logger.error("LiveExecutor: no token_id in signal")
             return None
 
         order_usd = signal.suggested_size_usd
 
-        # ─── FIX BUG-7: Allowance check before entry ──────────────────────
         available = await self._get_available_usdc()
         if available < order_usd:
             logger.warning(
-                "LIVE ENTRY BLOCKED: available $%.2f < order $%.2f "
-                "(active_orders locking $%.2f)",
-                available, order_usd, self._get_locked_usdc(),
+                "LIVE ENTRY BLOCKED: available $%.2f < order $%.2f",
+                available, order_usd,
             )
             return None
 
-        # SAFETY: order size must not exceed bankroll
         if order_usd > bankroll:
-            logger.error(
-                "LIVE ENTRY REJECTED: order $%.2f > bankroll $%.2f — DANGER GUARD",
-                order_usd, bankroll,
-            )
+            logger.error("LIVE ENTRY REJECTED: order $%.2f > bankroll $%.2f", order_usd, bankroll)
             return None
 
-        # ─── FIX BUG-6: Proper sizing (fee is taken from payout, not entry)
         price = signal.suggested_price
-        size = self._usd_to_shares(order_usd, price)
-
-        if size <= 0:
+        raw_size = self._usd_to_shares(order_usd, price)
+        if raw_size <= 0:
             logger.error("LIVE ENTRY REJECTED: size=0 (price=%.3f, usd=%.2f)", price, order_usd)
             return None
 
+        # FIX: precision guard for cheap tokens ("maker 2 decimals, taker 5 decimals")
+        size, price = self._round_order_amounts(raw_size, price)
+
         if size < MIN_ORDER_SIZE:
             logger.warning(
-                "LIVE ENTRY REJECTED: size %.2f < min %d shares "
-                "(price=%.3f, usd=%.2f, need $%.2f)",
-                size, MIN_ORDER_SIZE, price, order_usd, MIN_ORDER_SIZE * price,
+                "LIVE ENTRY REJECTED: size %.2f < min %d shares after rounding",
+                size, MIN_ORDER_SIZE,
             )
             return None
 
         logger.info(
-            "LIVE ENTRY: BUY %s %.0f @ %.3f ($%.2f) | %s",
+            "LIVE ENTRY (FOK): BUY %s %.2f @ %.4f ($%.2f) | %s",
             token_id[:12], size, price, order_usd, market_question[:50],
         )
 
@@ -268,7 +259,6 @@ class LiveExecutor:
                 from py_clob_client_v2.clob_types import OrderArgs, OrderType, CreateOrderOptions
                 from py_clob_client_v2.order_builder.constants import BUY
 
-                # Get market metadata
                 try:
                     tick_size_str = str(client.get_tick_size(token_id))
                 except Exception:
@@ -291,61 +281,38 @@ class LiveExecutor:
                 t_sign = (time.time() - t0) * 1000
 
                 t1 = time.time()
-                result = client.post_order(signed, OrderType.GTC)
+                result = client.post_order(signed, OrderType.FOK)
                 t_post = (time.time() - t1) * 1000
 
                 await asyncio.sleep(self._min_order_gap_sec)
-
                 self._order_latency.append((time.time() - t0) * 1000)
 
                 status = result.get("status", "?")
                 order_id = result.get("orderID", "")
-                tx_hashes = result.get("transactionsHashes", [])
 
                 logger.info(
-                    "LIVE ORDER: %s | status=%s | sign=%.0fms post=%.0fms | tx=%s",
-                    order_id[:16] if order_id else "no-id",
-                    status, t_sign, t_post, tx_hashes,
+                    "LIVE ORDER (FOK): %s | status=%s | sign=%.0fms post=%.0fms",
+                    order_id[:16] if order_id else "no-id", status, t_sign, t_post,
                 )
 
                 if status == "matched":
-                    # Order filled immediately — create position
                     self._track_order(order_id, token_id, "BUY", price, size,
                                       market_question, signal.id, signal.strategy_name, "matched")
                     return self._build_position(signal, token_id, price, size, market_question)
 
-                elif status == "live":
-                    # ─── FIX BUG-1 + BUG-3: Track "live" orders with timeout ──
-                    self._track_order(order_id, token_id, "BUY", price, size,
-                                      market_question, signal.id, signal.strategy_name, "live")
-
-                    logger.info(
-                        "LIVE ORDER on book (status=live) %s | %.0f shares @ $%.4f = $%.2f | "
-                        "timeout=%ds",
-                        order_id[:12] if order_id else "?", size, price, order_usd,
-                        ORDER_TIMEOUT_SEC,
-                    )
-
-                    # Build PENDING position BEFORE timeout task starts
-                    # BUG FIX: return position so bot.py can track it in position_repo
-                    # _pending_positions in bot.py handles exit-safety (skip exits for 10s)
-                    pending_pos = self._build_position(signal, token_id, price, size, market_question)
-                    self._live_order_to_pos[order_id] = pending_pos.id
-
-                    # Start timeout task — auto-cancel if not filled
-                    asyncio.create_task(
-                        self._order_timeout_task(order_id, ORDER_TIMEOUT_SEC),
-                        name=f"order_timeout_{order_id[:8]}",
-                    )
-                    return pending_pos
-
-                else:
-                    logger.warning("LIVE ORDER unknown status: %s — treating as failed", status)
-                    return None
+                logger.info("LIVE ENTRY not filled (status=%s) — book too thin, skipping", status)
+                return None
 
             except Exception as e:
                 logger.error("LIVE ENTRY FAILED: %s", e, exc_info=True)
                 return None
+
+    def _round_order_amounts(self, size: float, price: float) -> tuple[float, float]:
+        """Round size/price for CLOB precision: price→4dp, size→2dp.
+
+        FIX for "maker amount max 2 decimals, taker amount max 5 decimals".
+        """
+        return round(size, 2), round(price, 4)
 
     async def close_position(
         self, pos: Position, exit_price: float, reason: str, **kwargs

@@ -90,7 +90,7 @@ class PolyClawCipherV3:
             self.executor = PaperExecutor(self.config.get("execution", {}).get("paper", {}))
             # v3.5.13: Wire callbacks for live-realism simulation (paper only)
             self.executor.gas_fee_callback = self._deduct_gas_fee
-            self.executor.on_position_confirmed = self._confirm_position
+            # v3.5.19: on_position_confirmed removed — FOK entry makes PENDING obsolete
 
         # Alerts (stub)
         self.alerter = Alerter(self.config.get("monitoring", {}))
@@ -145,14 +145,11 @@ class PolyClawCipherV3:
         # v3.4.0 FIX (BUG-C7): Cache open positions per loop iteration
         self._cached_open_positions: list[Position] = []
         # v3.5.5 FIX (P1-05): Force-close stale/dead positions to free cash
-        self.max_position_age_sec = self.config.get("risk", {}).get("max_position_age_sec", 1800)  # 30 min
-        self.dead_position_age_sec = self.config.get("risk", {}).get("dead_position_age_sec", 900)  # 15 min
-        # v3.5.13: Position state sync - track PENDING positions (not yet on-chain confirmed)
-        # Position lifecycle: PENDING (submitted, awaiting block confirmation)
-        #                     → CONFIRMED (on-chain, can exit)
-        # Bot cannot exit PENDING positions - prevents "exit fails, position stuck" bug
-        self._pending_positions: set[str] = set()  # position IDs in PENDING state
-        self._total_gas_fees_paid: float = 0.0  # track cumulative gas for stats
+        self.max_position_age_sec = self.config.get("risk", {}).get("max_position_age_sec", 1800)
+        self.dead_position_age_sec = self.config.get("risk", {}).get("dead_position_age_sec", 900)
+        # v3.5.19: PENDING machinery removed — entry FOK means position only exists when matched.
+        # No more "live order → PENDING → auto-confirm" state chain.
+        self._total_gas_fees_paid: float = 0.0
         self._stats_task: asyncio.Task | None = None
 
     async def run(self) -> None:
@@ -484,27 +481,21 @@ class PolyClawCipherV3:
             )
             if pos is None:
                 await self.signal_repo.log_signal(signal, executed=False, rejected_reason="fill_rejected")
-                self.wallet.release(required_cash)  # v3.5.19: release reserve on fill reject
+                self.wallet.release(required_cash)
                 return
 
-            # v3.5.13: Mark position as PENDING (will be confirmed after on-chain delay)
-            # Position cannot be exited until confirmed - prevents "exit fails, position stuck" bug
-            self._pending_positions.add(pos.id)
+            # v3.5.19: FOK entry → position only exists when order matched.
+            # No PENDING state needed.
 
-            # v3.4.0 FIX (BUG-C2): Handle InsufficientFundsError from wallet.debit()
-            # If concurrent signals drained cash, gracefully reject instead of crashing
+            # Persist
             try:
-                # Persist
                 await self.position_repo.open_position(pos)
                 await self.wallet.debit(pos.invested)
 
-                # FIX: Handle pair sibling (atomic_arb creates 2 legs)
                 sibling = self.executor.take_pair_sibling()
                 if sibling:
                     await self.position_repo.open_position(sibling)
                     await self.wallet.debit(sibling.invested)
-                    # v3.5.13: Mark sibling as PENDING too
-                    self._pending_positions.add(sibling.id)
                     # Register sibling entry in strategy
                     if hasattr(strat, "register_entry"):
                         # v3.5.11: Pass invested for fee-aware time exit
@@ -570,13 +561,7 @@ class PolyClawCipherV3:
         market_map = {m.condition_id: m for m in self._markets}
 
         for pos in positions[:]:
-            # v3.5.13: Skip PENDING positions
-            if self._is_position_pending(pos.id):
-                if time.time() - pos.opened_at > 10:
-                    self._pending_positions.discard(pos.id)
-                    logger.warning("Position %s auto-confirmed (PENDING > 10s)", pos.id[:8])
-                else:
-                    continue
+            # v3.5.19: PENDING auto-confirm removed — FOK entry: position exists only when matched
 
             market = market_map.get(pos.market_condition_id)
 
@@ -948,18 +933,8 @@ class PolyClawCipherV3:
             except Exception as e:
                 logger.error("Gas fee deduction failed: %s", e)
 
-    def _confirm_position(self, pos_id: str) -> None:
-        """Mark position as confirmed after on-chain delay.
-
-        Called by PaperExecutor._confirm_position_after_delay() async task.
-        Removes position from _pending_positions set, allowing exit logic to proceed.
-        """
-        self._pending_positions.discard(pos_id)
-        logger.debug("Position %s confirmed (removed from pending set)", pos_id)
-
-    def _is_position_pending(self, pos_id: str) -> bool:
-        """Check if position is still pending (not yet on-chain confirmed)."""
-        return pos_id in self._pending_positions
+    # v3.5.19: _confirm_position and _is_position_pending removed —
+    # FOK entry eliminates PENDING state entirely.
 
     async def _close_position(self, pos: Position, trade, strat_name: str) -> None:
         """Close position: persist trade, update wallet, update risk.
