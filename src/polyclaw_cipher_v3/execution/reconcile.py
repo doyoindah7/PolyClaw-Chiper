@@ -235,15 +235,36 @@ async def reconcile_from_clob(executor, wallet, position_repo, trade_repo, marke
                 float(rp.get("currentValue", 0)) for rp in redeemable_tokens
             )
         
-        # ─── 4b. CLEANUP: Remove DB positions not in Data API (prevent phantom positions) ───
-        # Only delete positions older than 5 min — new positions need time for Data API indexing
+        # ─── 4b. CLEANUP: Remove DB positions not in Data API ───
+        # v3.5.19: closed_locally guard — FOK exit stamps position immediately.
+        # If Data API hasn't indexed the close yet (indexer lag), do NOT treat as phantom.
         if api_positions:
             api_token_ids = {p.get("asset", "") for p in api_positions}
             now = time.time()
             for p in (local_positions or []):
-                if p.token_id not in api_token_ids and (now - p.opened_at) > 300:
+                if p.token_id in api_token_ids:
+                    continue
+
+                # Check local closure signal first (FOK exit confirmed on CLOB)
+                if getattr(p, "closed_locally", False):
+                    age_since_close = now - (getattr(p, "closed_locally_ts", 0) or 0)
+                    if age_since_close < 300:
+                        logger.debug(
+                            "CLOB reconcile: %s absent from Data API but closed_locally "
+                            "%.0fs ago — indexer lag, not phantom", p.id[:8], age_since_close,
+                        )
+                        continue
+                    # Aged past threshold with confirmed local close — safe to finalize
                     await position_repo.close_position(p.id)
-                    logger.info("CLOB reconcile: removed phantom position %s | %s | age=%.0fs (not in Data API)",
+                    logger.info("CLOB reconcile: finalized closed_locally position %s (age=%.0fs)",
+                               p.id[:8], age_since_close)
+                    stats["positions_removed"] = stats.get("positions_removed", 0) + 1
+                    continue
+
+                # No local closure record — original age-based phantom check
+                if (now - p.opened_at) > 300:
+                    await position_repo.close_position(p.id)
+                    logger.info("CLOB reconcile: removed phantom position %s | %s | age=%.0fs",
                                p.id[:8], p.market_question[:30], now - p.opened_at)
                     stats["positions_removed"] = stats.get("positions_removed", 0) + 1
         
@@ -289,20 +310,33 @@ async def reconcile_from_clob(executor, wallet, position_repo, trade_repo, marke
             await wallet._save()
             stats["corrected"] = True
         
-        # ─── 6. Cancel orphaned open orders ───
+        # ─── 6. Cancel orphaned open orders — GLOBAL, with guard ───
+        # v3.5.19: cancel_all() nukes EVERY open order including fresh BUY entries.
+        # Guard: only fire if EVERY open order is older than ENTRY_TIMEOUT_SEC,
+        # so we never cancel an in-flight entry still within its fair fill window.
         if open_orders_data:
+            now_ts = time.time()
+            ages = []
             for o in open_orders_data:
                 if isinstance(o, dict):
-                    order_id = o.get("id", o.get("order_id", ""))
                     created = o.get("created_at", 0)
-                    age = time.time() - float(created) if created else 999
-                    
-                    if age > 300:  # Older than 5 min
-                        logger.warning("CLOB reconcile: cancelling orphaned order %s (age=%.0fs)", order_id[:12], age)
-                        try:
-                            await asyncio.to_thread(client.cancel_orders, [order_id])
-                        except Exception as e:
-                            logger.warning("CLOB reconcile: cancel orphan ignored: %s", str(e)[:80])
+                    ages.append(now_ts - float(created) if created else 999)
+
+            if ages and min(ages) > 60:  # 60s = ORDER_TIMEOUT_SEC
+                try:
+                    await asyncio.to_thread(client.cancel_all)
+                    logger.warning(
+                        "CLOB reconcile: cancel_all() fired — %d orphaned orders "
+                        "(all >60s old, no fresh entries)", len(open_orders_data),
+                    )
+                except Exception as e:
+                    logger.warning("CLOB reconcile: cancel_all() failed: %s", str(e)[:120])
+            else:
+                logger.debug(
+                    "CLOB reconcile: skipping cancel_all() — %d open orders, "
+                    "youngest %.0fs (< 60s entry timeout)",
+                    len(open_orders_data), min(ages) if ages else 0,
+                )
         
         # v3.6.1: After reconcile, clear only FILLED close tokens (not all)
         # Reconcile found which positions closed — remove only those from pending

@@ -227,6 +227,10 @@ class Position(BaseModel):
     is_pair: bool = False
     pair_id: str = ""
     pair_sibling_id: str = ""
+    # v3.5.19: FOK exit tracking — set to True when close_position() gets CLOB "matched"
+    # Prevents reconcile from treating recently-closed positions as phantoms (Data API indexer lag)
+    closed_locally: bool = False
+    closed_locally_ts: float = 0.0
 
     @property
     def crypto_asset(self) -> str | None:
@@ -260,6 +264,9 @@ class Trade(BaseModel):
     reason: str = ""
     is_pair: bool = False
     pair_id: str = ""
+    # v3.5.19: Set by close_position() when FOK exit is confirmed "matched" on CLOB
+    closed_locally: bool = False
+    closed_locally_ts: float = 0.0
 
 
 class NewsEvent(BaseModel):

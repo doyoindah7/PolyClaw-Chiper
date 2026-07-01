@@ -556,10 +556,13 @@ class PolyClawCipherV3:
         v3.4.3 FIX: When market is not in active scan (market_map returns None),
         fetch it from Gamma API to check if it's resolved.
 
-        BATCH 1 FIXES:
-        - BUG-12: Price fallback chain for TP/SL (CLOB WS → pos.current_price → entry_price)
-        - BUG-13: Use executor.is_exiting() instead of _pending_close_tokens (prevents stuck positions)
+        v3.5.19: Check executor._manual_review for positions needing human attention.
         """
+        # ─── v3.5.19: Alert on positions that exhausted exit retries ───
+        if hasattr(self.executor, "get_manual_review_positions"):
+            flagged = self.executor.get_manual_review_positions()
+            if flagged:
+                logger.critical("POSITIONS NEEDING MANUAL REVIEW: %s", flagged)
         positions = self._cached_open_positions
         if not positions:
             return

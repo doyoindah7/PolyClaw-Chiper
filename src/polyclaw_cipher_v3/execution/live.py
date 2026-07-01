@@ -97,16 +97,22 @@ class LiveExecutor:
         # Latency tracking
         self._order_latency: list[float] = []
 
-        # ─── Exit State Tracking ────────────────────────────────────────────
-        # token_id -> timestamp when exit was attempted (prevents retry loop)
-        self._exiting_tokens: dict[str, float] = {}
+        # ─── Exit State Tracking (v3.5.19: FOK exit + retry cap) ────────────
+        # token_id -> {"last_attempt": ts, "retry_count": int}
+        self._exiting_tokens: dict[str, dict] = {}
+        EXIT_MAX_RETRIES = 3
+        EXIT_BACKOFF_SEC = [5, 15, 45]
+        # position IDs needing human attention (retries exhausted)
+        self._manual_review: set[str] = set()
+        # token_id -> shares reserved for in-flight exit (release-on-exception guard)
+        self._exit_reserved: dict[str, float] = {}
 
         # ─── PENDING Position Tracking (BUG FIX: live orders invisible) ─────
         # order_id -> position_id for "live" orders (not yet matched)
         self._live_order_to_pos: dict[str, str] = {}
         # position IDs whose CLOB order timed out (need cleanup)
         self._timed_out_pos_ids: set[str] = set()
-        self._exit_retry_delay_sec = self.config.get("exit_retry_delay_sec", 30)
+        self._exit_retry_delay_sec = self.config.get("exit_retry_delay_sec", 5)
 
         # ─── Rate Limiter (prevent CLOB API 429) ──────────────────────────
         self._order_semaphore = asyncio.Semaphore(1)  # 1 order at a time
@@ -344,15 +350,17 @@ class LiveExecutor:
     async def close_position(
         self, pos: Position, exit_price: float, reason: str, **kwargs
     ) -> Trade | None:
-        """Close position with proper order lifecycle.
+        """Close position via FOK (Fill-or-Kill) — never rests on book.
 
-        Flow:
-            1. Check if already exiting (prevent retry loop)
-            2. Cancel ALL open orders for this token_id (free allowance)
-            3. Wait for cancel to process
-            4. Place SELL order (GTC)
-            5. If "matched": create Trade, clear exiting state, return
-            6. If "live": track order, return None (position stays "exiting")
+        Why FOK instead of GTC for exits:
+        - GTC exit can end up "live" (unmatched) → nyangkut di book → lock
+          allowance → retry berikutnya gagal "not enough balance" karena
+          shares masih dikomit ke order lama.
+        - FOK fills completely right now, or fails immediately.
+          No resting order → no need for cancel-before-sell.
+
+        Retry: max 3 attempts, exponential backoff 5/15/45s.
+        Exhausted → cancel_all() + flag manual review.
         """
         if not self.enabled:
             return self._fake_trade(pos, exit_price, reason)
@@ -361,39 +369,40 @@ class LiveExecutor:
 
         if pos.shares < MIN_ORDER_SIZE:
             logger.warning(
-                "LIVE CLOSE SKIP: %s has %.2f shares < min %d — cannot sell on CLOB",
+                "LIVE CLOSE SKIP: %s has %.2f shares < min %d",
                 pos.id[:8], pos.shares, MIN_ORDER_SIZE,
             )
             return None
 
-        # ─── FIX BUG-5: Check exiting state with retry delay ──────────────
-        last_exit = self._exiting_tokens.get(token_id)
-        if last_exit and (time.time() - last_exit) < self._exit_retry_delay_sec:
-            logger.debug("LIVE CLOSE SKIP: %s exit attempted %.0fs ago (retry in %.0fs)",
-                        token_id[:12], time.time() - last_exit,
-                        self._exit_retry_delay_sec - (time.time() - last_exit))
+        exit_state = self._exiting_tokens.get(token_id)
+        retry_count = exit_state["retry_count"] if exit_state else 0
+
+        if exit_state and (time.time() - exit_state["last_attempt"]) < self._exit_retry_delay_sec:
+            logger.debug("LIVE CLOSE SKIP: %s in backoff (retry %d/3)",
+                        token_id[:12], retry_count)
             return None
 
-        # Mark as exiting (prevents retry loop)
-        self._exiting_tokens[token_id] = time.time()
+        if retry_count >= 3:
+            await self._exhaust_exit_retries(pos, token_id, reason)
+            return None
+
+        # Set backoff for this attempt before we know outcome
+        backoff = [5, 15, 45][min(retry_count, 2)]
+        self._exit_retry_delay_sec = backoff
+        self._exiting_tokens[token_id] = {"last_attempt": time.time(), "retry_count": retry_count + 1}
 
         client = self._ensure_client()
         exit_side = "SELL" if pos.side == Side.YES else "BUY"
 
         logger.info(
-            "LIVE CLOSE: %s %s %.0f @ %.3f | %s",
-            exit_side, token_id[:12], pos.shares, exit_price, reason,
+            "LIVE CLOSE (FOK): %s %s %.0f @ %.3f | %s (attempt %d/3)",
+            exit_side, token_id[:12], pos.shares, exit_price, reason, retry_count + 1,
         )
 
-        try:
-            # ─── FIX BUG-4: Cancel open orders BEFORE placing SELL ────────
-            cancelled = await self._cancel_orders_for_token(token_id)
-            if cancelled > 0:
-                logger.info("LIVE CLOSE: cancelled %d open orders for %s before SELL",
-                           cancelled, token_id[:12])
-                # Small delay for CLOB to process cancellations
-                await asyncio.sleep(CANCEL_BEFORE_SELL_SEC)
+        # Reserve shares for this attempt — guaranteed release in finally
+        self._exit_reserved[token_id] = pos.shares
 
+        try:
             from py_clob_client_v2.clob_types import OrderArgs, OrderType, CreateOrderOptions
             from py_clob_client_v2.order_builder.constants import BUY, SELL
 
@@ -420,7 +429,7 @@ class LiveExecutor:
             t_sign = (time.time() - t0) * 1000
 
             t1 = time.time()
-            result = client.post_order(signed, OrderType.GTC)
+            result = client.post_order(signed, OrderType.FOK)
             t_post = (time.time() - t1) * 1000
 
             self._order_latency.append((time.time() - t0) * 1000)
@@ -429,35 +438,56 @@ class LiveExecutor:
             order_id = result.get("orderID", "")
 
             logger.info(
-                "LIVE CLOSE ORDER: %s | status=%s | sign=%.0fms post=%.0fms",
+                "LIVE CLOSE FOK: %s | status=%s | sign=%.0fms post=%.0fms",
                 order_id[:16] if order_id else "no-id", status, t_sign, t_post,
             )
 
             if status == "matched":
                 making_amount = float(result.get("makingAmount", 0) or 0)
-                self._exiting_tokens.pop(token_id, None)  # Clear exiting state
-                return self._build_trade(pos, exit_price, making_amount, reason)
+                self._exiting_tokens.pop(token_id, None)
+                trade = self._build_trade(pos, exit_price, making_amount, reason)
+                trade.closed_locally = True
+                trade.closed_locally_ts = time.time()
+                return trade
 
-            elif status == "live":
-                # Track the close order, position stays "exiting"
-                self._track_order(order_id, token_id, exit_side, exit_price,
-                                  pos.shares, pos.market_question, pos.id, pos.strategy, "live")
-                # Start timeout for close order too
-                asyncio.create_task(
-                    self._order_timeout_task(order_id, ORDER_TIMEOUT_SEC),
-                    name=f"close_timeout_{order_id[:8]}",
-                )
-                logger.info("LIVE CLOSE order on book — waiting for fill...")
-                return None
-
-            else:
-                logger.error("LIVE CLOSE unknown status: %s — will retry later", status)
-                return None
+            # FOK by definition either fills or dies — no resting order
+            logger.warning(
+                "LIVE CLOSE FOK did not fill: status=%s — retry %d/3 in %ds",
+                status, retry_count + 1, backoff,
+            )
+            return None
 
         except Exception as e:
-            logger.error("LIVE CLOSE FAILED: %s (exit_price=%.3f) — will retry in %ds",
-                        e, exit_price, self._exit_retry_delay_sec)
+            logger.error(
+                "LIVE CLOSE FAILED: %s (exit_price=%.3f) — retry %d/3 in %ds",
+                e, exit_price, retry_count + 1, backoff,
+            )
             return None
+
+        finally:
+            self._exit_reserved.pop(token_id, None)
+
+    async def _exhaust_exit_retries(self, pos: Position, token_id: str, reason: str) -> None:
+        """Last resort: cancel everything + flag for human review."""
+        client = self._ensure_client()
+        try:
+            cancelled = await asyncio.to_thread(client.cancel_all)
+            logger.critical(
+                "EXIT RETRY EXHAUSTED for %s (token=%s, reason=%s). "
+                "cancel_all() removed %s open orders. FLAGGING FOR MANUAL REVIEW.",
+                pos.id, token_id[:12], reason, cancelled,
+            )
+        except Exception as e:
+            logger.critical(
+                "EXIT RETRY EXHAUSTED for %s AND cancel_all() failed: %s. "
+                "MANUAL INTERVENTION REQUIRED.", pos.id, e,
+            )
+        self._manual_review.add(pos.id)
+        self._exiting_tokens.pop(token_id, None)
+
+    def get_manual_review_positions(self) -> set[str]:
+        """bot.py should poll this and alert."""
+        return self._manual_review.copy()
 
     async def resolve_position(
         self, pos: Position, winning_side: str
@@ -598,25 +628,18 @@ class LiveExecutor:
                        oid[:12], now - self._active_orders[oid].created_at)
             await self._cancel_order(oid)
 
-    # ─── FIX BUG-10: Proper exiting state management ────────────────────────
+    # ─── Exit State Management (v3.5.19: FOK dict-based) ────────────────
 
     def is_exiting(self, token_id: str) -> bool:
-        """Check if a token is currently being exited (has active close order)."""
-        # Check _exiting_tokens with retry delay
-        last_exit = self._exiting_tokens.get(token_id)
-        if last_exit and (time.time() - last_exit) < self._exit_retry_delay_sec:
+        """Check if a token is currently being exited."""
+        exit_state = self._exiting_tokens.get(token_id)
+        if exit_state and (time.time() - exit_state["last_attempt"]) < self._exit_retry_delay_sec:
             return True
-
-        # Also check if there's an active SELL order for this token
-        for oid in self._token_orders.get(token_id, set()):
-            order = self._active_orders.get(oid)
-            if order and order.side in ("SELL",) and order.status == "live":
-                return True
-
+        # FOK never rests on book — no need to check active SELL orders for exit
         return False
 
     def clear_exiting(self, token_id: str):
-        """Clear exiting state for a token (called when position confirmed closed)."""
+        """Clear exiting state (called when position confirmed closed)."""
         self._exiting_tokens.pop(token_id, None)
 
     # ─── AllowanceGuard ───────────────────────────────────────────────────────
