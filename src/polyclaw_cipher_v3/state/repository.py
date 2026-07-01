@@ -55,8 +55,29 @@ class PositionRepository:
             (current_price, current_value, pos_id),
         )
 
+    async def update_position(self, pos: Position) -> None:
+        """Full position update — sync shares, prices, invested from external source."""
+        await self.db.execute(
+            """UPDATE positions SET
+                shares = ?, entry_price = ?, invested = ?,
+                current_price = ?, current_value = ?,
+                market_question = ?, side = ?, market_condition_id = ?
+            WHERE id = ?""",
+            (
+                pos.shares, pos.entry_price, pos.invested,
+                pos.current_price, pos.current_value,
+                pos.market_question, pos.side.value, pos.market_condition_id,
+                pos.id,
+            ),
+        )
+
     async def total_invested(self) -> float:
         row = await self.db.fetchone("SELECT COALESCE(SUM(invested), 0) AS total FROM positions")
+        return float(row["total"]) if row else 0.0
+
+    async def total_current_value(self) -> float:
+        """v3.6.0: Market-value sum (shares * current_price) — not cost basis."""
+        row = await self.db.fetchone("SELECT COALESCE(SUM(shares * current_price), 0) AS total FROM positions")
         return float(row["total"]) if row else 0.0
 
 

@@ -447,29 +447,30 @@ class PolyClawCipherV3:
             logger.warning("Signal blocked (insufficient available cash due to pending orders): need $%.2f", required_cash)
             return
 
-        # v3.5.17: Live mode — dynamic sizing to meet CLOB minimum 5 shares
-        # Gemini recommendation: upsize to meet minimum, don't block signals
-        live_mode = os.environ.get("BOT_MODE", "") == "live"
-        if live_mode:
-            min_shares = 5
-            min_usd_needed = min_shares * signal.suggested_price
-            if signal.suggested_size_usd < min_usd_needed:
-                # Upsize to meet 5-share minimum (Gemini dynamic sizer)
+        # v3.5.19: CLOB minimum check — apply to ALL modes for accurate simulation
+        # Two constraints: min $1.00 notional AND min 5 shares
+        MIN_ORDER_USD = 1.00
+        min_shares = 5
+        share_min_usd = min_shares * signal.suggested_price
+        min_usd_needed = max(MIN_ORDER_USD, share_min_usd)
+        if signal.suggested_size_usd < min_usd_needed:
+                # Upsize to meet CLOB minimum
                 upsized_notional = min_usd_needed
                 max_allowed = self.wallet.bankroll * self.risk.get_strategy_capital_pct(strat.name)
                 if upsized_notional <= max_allowed and self.wallet.has_funds(upsized_notional):
                     logger.info(
-                        "Signal upsized for CLOB 5-share min: $%.2f → $%.2f (%.0f shares @ $%.4f)",
+                        "Signal upsized for CLOB min ($%.2f→$%.2f, %dsh @ $%.4f)",
                         signal.suggested_size_usd, upsized_notional,
-                        min_shares, signal.suggested_price,
+                        int(max(min_shares, upsized_notional/signal.suggested_price)),
+                        signal.suggested_price,
                     )
                     signal = signal.model_copy(update={"suggested_size_usd": round(upsized_notional, 2)})
-                    required_cash = upsized_notional  # update required_cash for wallet check below
+                    required_cash = upsized_notional
                 else:
                     await self.signal_repo.log_signal(signal, executed=False,
-                        rejected_reason=f"below_clob_min_size_insufficient_funds (need ${min_usd_needed:.2f}, max ${max_allowed:.2f})")
-                    logger.warning("Signal blocked (CLOB min 5 shares + no budget): need $%.2f, max $%.2f",
-                                   min_usd_needed, max_allowed)
+                        rejected_reason=f"below_clob_min (need ${min_usd_needed:.2f}, max ${max_allowed:.2f})")
+                    logger.warning("Signal blocked (CLOB min $%.2f+budget): need $%.2f, max $%.2f",
+                                   min_usd_needed, min_usd_needed, max_allowed)
                     return
 
         self.wallet.reserve(required_cash)

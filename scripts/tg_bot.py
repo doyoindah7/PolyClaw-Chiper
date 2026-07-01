@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PolyClaw-Cipher TG Bot — Ireland monitor v3.5.16.
+"""PolyClaw-Cipher TG Bot — Ireland monitor v3.5.17.
 
 Usage: python3 scripts/tg_bot.py
 Env: TG_BOT_TOKEN, TG_CHAT_ID, BOT_API_BASES (JSON list)

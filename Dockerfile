@@ -11,7 +11,7 @@ COPY src/ /app/src/
 COPY config/ /app/config/
 COPY scripts/ /app/scripts/
 
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir . py-clob-client-v2 web3 eth-abi py-builder-relayer-client
 
 RUN mkdir -p /app/data
 
@@ -26,6 +26,6 @@ ENV HTTP_PORT=8082
 EXPOSE 8082
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8082/api/health || exit 1
+    CMD curl -fsS http://127.0.0.1:${HTTP_PORT:-8082}/api/health || exit 1
 
 CMD ["python", "scripts/daemon.py"]

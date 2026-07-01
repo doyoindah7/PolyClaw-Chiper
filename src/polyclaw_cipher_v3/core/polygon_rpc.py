@@ -15,9 +15,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_RPCS = [
-    ("primary", "https://polygon.llamarpc.com"),
-    ("fallback", "https://rpc.ankr.com/polygon"),
-    ("emergency", "https://polygon-rpc.com"),
+    ("primary", "https://polygon.drpc.org"),
+    ("fallback", "https://1rpc.io/matic"),
+    ("emergency", "https://rpc.ankr.com/polygon"),
 ]
 
 

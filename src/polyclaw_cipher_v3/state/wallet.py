@@ -39,8 +39,9 @@ class Wallet:
         else:
             self._bankroll = row["bankroll"]
             self._cash = row["cash"]
-            self.initial_bankroll = row["initial_bankroll"]
-            logger.info("Wallet loaded: bankroll=$%.2f, cash=$%.2f", self._bankroll, self._cash)
+            # v3.6.0: NEVER override initial_bankroll from DB — config/env is source of truth
+            logger.info("Wallet loaded: bankroll=$%.2f, cash=$%.2f (initial from config: $%.2f)", 
+                       self._bankroll, self._cash, self.initial_bankroll)
 
     async def _save(self) -> None:
         await self.db.execute(
@@ -109,6 +110,24 @@ class Wallet:
         """Update bankroll after recompute (called by repository)."""
         self._bankroll = value
         await self._save()
+
+    async def sync_from_clob(self, real_balance: float, total_invested: float = 0.0) -> None:
+        """Sync wallet from real CLOB balance (live mode).
+        
+        CLOB real_balance = free collateral (money ALREADY spent on positions is gone).
+        So equity/bankroll = real_balance + total_invested (total portfolio value).
+        Cash = real_balance (free, minus any locked in open orders — caller handles).
+        """
+        old_br = self._bankroll
+        old_cash = self._cash
+        self._bankroll = real_balance + total_invested  # Total equity = free cash + position value
+        self._cash = max(0.0, real_balance)  # Free cash (caller adjusts for locked orders)
+        self._reserved_cash = 0.0  # Clear reservations on sync
+        await self._save()
+        logger.warning(
+            "Wallet synced from CLOB: bankroll $%.2f → $%.2f, cash $%.2f → $%.2f",
+            old_br, self._bankroll, old_cash, self._cash,
+        )
 
     def snapshot(self) -> dict:
         return {

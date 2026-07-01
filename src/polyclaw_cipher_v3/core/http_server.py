@@ -978,18 +978,18 @@ function renderHistoryTable() {
   }
 
   let html = '<table class="tbl"><thead><tr>' +
-    '<th>Market</th><th>Strat</th><th>Side</th><th>Entry</th><th>Exit</th>' +
+    '<th>Market</th><th>Side</th><th>Shares</th><th>Invested</th><th>Entry</th><th>Exit</th>' +
     '<th>PnL $</th><th>PnL %</th><th>Reason</th><th>When</th>' +
     '</tr></thead><tbody>';
   for (const t of trades) {
     const pnlCls = t.pnl_dollar >= 0 ? 'pnl-pos' : 'pnl-neg';
-    const strat = t.strategy || '';
     const safeQ = (t.market_question||'').replace(/"/g,'&quot;');
     const safeR = (t.reason||'').replace(/"/g,'&quot;');
     html += '<tr style="cursor:pointer" onclick="toggleTradeDetail(\\'' + t.id + '\\')">' +
       '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + safeQ + '">' + (t.market_question||'').substring(0,35) + '</td>' +
-      '<td><span class="tag ' + strat + '">' + strat + '</span></td>' +
       '<td class="side-' + (t.side||'') + '">' + (t.side||'') + '</td>' +
+      '<td>' + fmt(t.shares||0, 1) + '</td>' +
+      '<td>$' + fmt(t.invested||0, 2) + '</td>' +
       '<td>$' + fmt(t.entry_price, 4) + '</td>' +
       '<td>$' + fmt(t.exit_price, 4) + '</td>' +
       '<td class="' + pnlCls + '" style="font-weight:600">' + (t.pnl_dollar>=0?'+':'') + '$' + fmt(t.pnl_dollar, 4) + '</td>' +
@@ -1001,7 +1001,7 @@ function renderHistoryTable() {
     const date = new Date(t.closed_at * 1000).toISOString().replace('T',' ').substring(0,19);
     const pairBadge = t.is_pair ? ' <span style="color:var(--purple)">PAIR</span>' : '';
     html += '<tr id="detail-' + t.id + '" style="display:none">' +
-      '<td colspan="9" style="background:var(--card2);padding:10px 12px;font-size:0.7rem;color:var(--muted)">' +
+      '<td colspan="11" style="background:var(--card2);padding:10px 12px;font-size:0.7rem;color:var(--muted)">' +
       '<div style="margin-bottom:4px"><b style="color:var(--text)">Full market:</b> ' + (t.market_question||'') + '</div>' +
       '<div style="margin-bottom:4px"><b style="color:var(--text)">Trade ID:</b> ' + t.id + pairBadge + ' · <b style="color:var(--text)">Strategy:</b> ' + t.strategy + '</div>' +
       '<div style="margin-bottom:4px"><b style="color:var(--text)">Entry:</b> $' + fmt(t.entry_price,4) + ' → <b style="color:var(--text)">Exit:</b> $' + fmt(t.exit_price,4) + '</div>' +

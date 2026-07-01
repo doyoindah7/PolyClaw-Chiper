@@ -1,0 +1,76 @@
+Oke, sekarang kelihatan jelas. Ini masalah klasik "resting order vs market taker" di CLOB — dan uniknya, kalau ini pakai Polymarket CLOB (mirip yang kita bahas kemarin), semua bug ini sebenarnya satu akar masalah yang sama. Coba gw uraikan per pertanyaan.
+
+## Root cause sebenarnya: exit lo pakai GTC padahal niatnya market order
+
+Ini kunci dari semua bug di atas. GTC = "resting order", dia nunggu di book sampai matched. Tapi exit logic lo (TP/SL) itu niatnya "keluar SEKARANG juga di harga market" — itu perilaku Fill-or-Kill/Fill-and-Kill, bukan GTC.
+
+Begitu order GTC "live" (belum matched), CLOB tetap **lock allowance** untuk order itu selama dia nangkring di book. Jadi kalau strategi kirim exit lagi 5 detik kemudian (karena return None dianggap gagal), allowance yang kepake sama order lama belum kebebas — makanya "not enough allowance" padahal secara logika posisi cuma satu.
+
+**Jawaban Q1: Ya, ganti ke FOK/FAK untuk exit.**
+- GTC hanya cocok untuk entry yang lo memang oke nunggu fill.
+- Untuk exit (TP/SL/force-close), pakai `OrderType.FOK` atau `FAK` (Fill-And-Kill / immediate-or-cancel). Kalau nggak bisa fill immediate → gagal cepat, TIDAK nyangkut di book, TIDAK lock allowance.
+- Ini otomatis menghilangkan kebutuhan "cancel all before sell" karena nggak akan ada order lama yang nyangkut dari sisi exit.
+
+## Q1b — soal cancel_all per-token vs global
+
+Even dengan FOK, tetap perbaiki `cancel_all()` supaya cancel **semua open order milik wallet**, bukan per-token — karena:
+- Kalau ada bug lain / crash di tengah proses yang ninggalin GTC order di token lain, itu tetap makan allowance global (allowance biasanya scoped ke collateral, bukan per-market).
+- Jalankan `cancel_all()` global sebagai bagian dari startup/reconcile cycle, bukan cuma sebelum exit spesifik.
+
+## Q2 — handle status "live"
+
+Kalau lo pindah ke FOK, kasus "live" (unmatched, resting) **seharusnya nggak pernah terjadi** untuk exit — FOK yang gagal fill akan langsung reject/cancelled, bukan "live". Jadi ini bukan soal "polling sampai matched", tapi desain ulang: exit yang gagal fill immediate = sinyal harga sudah bergerak, biarkan gagal cepat lalu re-evaluate harga terbaru di iterasi berikutnya (bukan retry order yang sama).
+
+Kalau memang ada kasus lain yang butuh GTC exit (misal limit exit di luar mid-price), maka baru perlu polling dengan timeout jelas — misal:
+```python
+order_id = post_order(...)
+status = await poll_order_status(order_id, timeout=3)
+if status != "matched":
+    await cancel_order(order_id)  # WAJIB, jangan biarin nyangkut
+    return None
+```
+Tapi untuk TP/SL bot seperti ini, FOK jauh lebih simpel dan aman.
+
+## Q3 — phantom position karena lag Data API
+
+Ini race condition murni: order matched di CLOB duluan, Data API index-nya telat beberapa menit. Solusinya bukan nunggu lebih lama doang (itu cuma nunda masalah), tapi **jangan andalkan Data API sebagai satu-satunya source of truth untuk "posisi sudah closed atau belum".**
+
+Perbaikan konkret:
+1. Begitu `close_position()` sukses dapat `status == "matched"` dari CLOB langsung (bukan dari Data API), **tandai posisi itu di DB sebagai `closed_locally=True, closed_at=now`** — jangan tunggu reconcile.
+2. Di `reconcile_from_clob()`, sebelum hapus sebagai "phantom", cek dulu: apakah posisi ini punya `closed_locally=True` yang lebih baru dari `age`? Kalau iya, **skip penghapusan** — itu bukan phantom, itu race lag.
+3. Kalau memang mau verifikasi independen dari Data API, query **CLOB order/trade history** langsung (`get_trades` atau endpoint sejenis) bukan Data API — biasanya lebih real-time daripada indexer.
+4. Baru anggap benar-benar "phantom" (dihapus paksa) kalau: tidak ada local close event DAN tidak ada di CLOB trade history DAN age > threshold (5-10 menit cukup aman kalau dua syarat pertama sudah dicek).
+
+## Q4 — allowance tracking
+
+Kombinasi dua-duanya, tapi utamanya local ledger:
+- Simpan `_committed_allowance` in-memory, increment saat post order (GTC entry), decrement saat order matched/cancelled confirmed.
+- Sebelum place order baru, hitung `available = clob_balance - _committed_allowance`, reject di level bot kalau kurang — jangan andalkan CLOB buat nolak duluan (lebih murah gagal cepat secara lokal daripada round-trip API dan masuk retry loop).
+- Query CLOB balance tetap perlu tapi sebagai **cross-check periodik** (misal tiap reconcile cycle), bukan dipercaya real-time untuk setiap keputusan order — karena balance query juga bisa lag.
+
+## Q5 — cap retry, wajib
+
+Retry unlimited + interval tetap (5s) itu resep untuk allowance makin ke-lock kalau akar masalahnya belum ketutup (kayak kasus lo). Saran:
+```python
+MAX_EXIT_RETRIES = 3
+BACKOFF = [5, 15, 45]  # detik, exponential-ish
+
+if retry_count >= MAX_EXIT_RETRIES:
+    await self._force_cancel_all_for_token(token_id)  # bersihin paksa
+    await self._flag_for_manual_review(pos, reason="exit_retry_exhausted")
+    # alert via log/telegram/dsb, JANGAN diam-diam skip
+    return
+```
+Setelah exhausted, **jangan cuma diem** — kirim alert (log level CRITICAL minimal, atau notifikasi kalau ada) karena posisi itu sekarang butuh perhatian manual, apalagi kalau melibatkan real fund.
+
+---
+
+### Ringkasan urutan prioritas fix
+
+1. **Ganti exit order type dari GTC → FOK/FAK** (ini fix akar masalah #1 dan #2 sekaligus)
+2. **Cancel_all jadi global**, bukan per-token, jalankan di reconcile cycle
+3. **`closed_locally` flag** supaya reconcile nggak salah hapus posisi yang barusan closed
+4. **In-memory allowance ledger** + cross-check periodik ke CLOB
+5. **Cap retry + alert**, jangan infinite loop
+
+Kalau mau, gw bisa bantu tulis ulang `close_position()` dan `reconcile_from_clob()` versi fixed sesuai poin di atas — tinggal kasih tau format order lengkap yang dipakai (misal signature `post_order`, `OrderType` enum yang tersedia) biar kodenya konsisten sama codebase lo.

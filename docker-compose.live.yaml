@@ -1,0 +1,46 @@
+services:
+  polyclaw-live:
+    build:
+      context: .
+    container_name: polyclaw-live
+    restart: unless-stopped
+    volumes:
+      - /home/ubuntu/polyclaw-cipher-v3/data_live:/app/data
+      - /home/ubuntu/polyclaw-cipher-v3/config:/app/config:ro
+    environment:
+      - BOT_MODE=live
+      - HTTP_PORT=8090
+      - INITIAL_BANKROLL_USD=6.0
+      - LIVE_FUNDER=0xf9f38a1dc12fc665222734cf73b1a8f5daf24e9a
+      - POLYGON_RPC_URL=https://api-polygon-mainnet-full.n.dwellir.com/4be0e187-1528-40c5-9472-49538aeb26e6
+      - TG_BOT_TOKEN=8461482229:AAGgT6PZu5x7ibA7HGTB0Z1fUtr1N5QD5fE
+      - TG_CHAT_ID=2051570522
+      - TG_DISABLE_POLL=true
+      - TG_INSTANCE_LABEL=🔴LIVE
+      - TG_ALERT_TRADES=1
+    env_file:
+      - live/.env
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      - "8090:8090"
+
+  polyclaw-live-tg:
+    image: polyclaw-cipher-v3-polyclaw-live
+    container_name: polyclaw-live-tg
+    restart: unless-stopped
+    volumes:
+      - /home/ubuntu/polyclaw-cipher-v3/scripts/tg_live_bot.py:/app/tg_live_bot.py:ro
+    environment:
+      - LIVE_TG_BOT_TOKEN=8461482229:AAGgT6PZu5x7ibA7HGTB0Z1fUtr1N5QD5fE
+      - TG_CHAT_ID=2051570522
+      - LIVE_API_BASE=http://18.200.234.149:8090
+      - LIVE_FUNDER=0xf9f38a1dc12fc665222734cf73b1a8f5daf24e9a
+    env_file:
+      - live/.env
+    command: python3 /app/tg_live_bot.py
+
+networks:
+  polyclaw-live_default:
+    driver: bridge
